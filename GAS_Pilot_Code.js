@@ -1158,7 +1158,9 @@ function getLiveOperations() {
       if (gpsLastRow >= 2) {
         var gpsVals = gpsSheet.getRange(2, 1, gpsLastRow - 1, 7).getValues();
         gpsVals.forEach(function(gr) {
-          if (String(gr[6]).trim() !== today) return;
+          var gpsDateVal = gr[6];
+          var gpsDate = (gpsDateVal instanceof Date) ? formatDateOnly_(gpsDateVal) : String(gpsDateVal).trim();
+          if (gpsDate !== today) return;
           var did = String(gr[0]).trim();
           if (!did) return;
           liveKmMap[did] = Math.max(liveKmMap[did] || 0, Number(gr[5]) || 0);
@@ -1278,7 +1280,11 @@ function getActiveDriversLive() {
 
     var latestByDriver = {};
     values.forEach(function(row) {
-      var shiftDate = String(row[6]).trim();
+      // Sheets may auto-convert the date string to a Date object — handle both cases
+      var shiftDateVal = row[6];
+      var shiftDate = (shiftDateVal instanceof Date)
+        ? formatDateOnly_(shiftDateVal)
+        : String(shiftDateVal).trim();
       if (shiftDate !== today) return;
       var driverId = String(row[0]).trim();
       if (!driverId) return;
@@ -1286,7 +1292,7 @@ function getActiveDriversLive() {
       latestByDriver[driverId] = {
         driverId:   driverId,
         driverName: String(row[1]).trim(),
-        timestamp:  String(row[2]).trim(),
+        timestamp:  (row[2] instanceof Date) ? formatDubai_(row[2]) : String(row[2]).trim(),
         lat:        Number(row[3]),
         lng:        Number(row[4]),
         kmTotal:    Number(row[5])
@@ -1317,8 +1323,14 @@ function getDriverRoute(driverId, dateStr) {
     var points = [];
     values.forEach(function(row) {
       if (String(row[0]).trim() !== driverId) return;
-      if (String(row[6]).trim() !== targetDate) return;
-      points.push({ timestamp: String(row[2]).trim(), lat: Number(row[3]), lng: Number(row[4]), km: Number(row[5]) });
+      // Sheets may auto-convert the date string to a Date object — handle both cases
+      var shiftDateVal = row[6];
+      var rowDate = (shiftDateVal instanceof Date)
+        ? formatDateOnly_(shiftDateVal)
+        : String(shiftDateVal).trim();
+      if (rowDate !== targetDate) return;
+      var ts = (row[2] instanceof Date) ? formatDubai_(row[2]) : String(row[2]).trim();
+      points.push({ timestamp: ts, lat: Number(row[3]), lng: Number(row[4]), km: Number(row[5]) });
     });
 
     return { success: true, driverId: driverId, date: targetDate, points: points };
