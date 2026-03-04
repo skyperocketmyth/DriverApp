@@ -55,6 +55,7 @@
       "url": "https://u.expo.dev/a33a4524-41f0-4303-99ab-517ef9fb0ceb"
     },
     "plugins": [
+      "@react-native-firebase/app",
       [
         "expo-location",
         {

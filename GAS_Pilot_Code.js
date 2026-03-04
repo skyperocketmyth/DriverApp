@@ -134,6 +134,8 @@ function doPost(e) {
       result = saveShiftEnd(body.data);
     } else if (action === 'saveGpsPoint') {
       result = saveGpsPoint(body.data);
+    } else if (action === 'saveGpsPointsBatch') {
+      result = saveGpsPointsBatch(body.data);
     } else if (action === 'updateFacilityLeft') {
       result = updateFacilityLeft(body.data);
     } else {
@@ -1269,6 +1271,42 @@ function saveGpsPoint(data) {
   }
 }
 
+// Batch insert GPS points — accepts { points: [{userId, userName, lat, lng, km, ts, shiftRowId}] }
+// Uses sheet.getRange().setValues() for a single write operation instead of N appendRow calls.
+// This is 10-50x faster and far more reliable over cellular than individual HTTP calls.
+function saveGpsPointsBatch(data) {
+  try {
+    var points = data && data.points;
+    if (!points || !points.length) return { success: true, inserted: 0 };
+
+    var sheet     = getOrCreateGpsTrackingSheet_();
+    var now       = new Date();
+    var shiftDate = formatDateOnly_(now);
+
+    var rows = points.map(function(p) {
+      // Use client-provided timestamp if present; otherwise fall back to server time
+      var ts = p.ts ? p.ts : formatDubai_(now);
+      return [
+        p.userId   || '',
+        p.userName || '',
+        ts,
+        Number(p.lat) || 0,
+        Number(p.lng) || 0,
+        Math.round(Number(p.km) * 100) / 100 || 0,
+        shiftDate,
+        p.shiftRowId || ''
+      ];
+    });
+
+    var startRow = sheet.getLastRow() + 1;
+    sheet.getRange(startRow, 1, rows.length, 8).setValues(rows);
+
+    return { success: true, inserted: rows.length };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 // Returns the latest GPS point for each driver active today
 function getActiveDriversLive() {
   try {
@@ -1338,10 +1376,59 @@ function getDriverRoute(driverId, dateStr, shiftRowId) {
       points.push({ timestamp: ts, lat: Number(row[3]), lng: Number(row[4]), km: Number(row[5]) });
     });
 
-    return { success: true, driverId: driverId, date: targetDate, points: points };
+    if (points.length < 2) return { success: true, driverId: driverId, date: targetDate, points: points };
+
+    // --- Roads API snap-to-roads with 5-minute CacheService cache ---
+    var cacheKey = 'route_' + (shiftRowId ? String(shiftRowId) : driverId) + '_' + targetDate;
+    var cache    = CacheService.getScriptCache();
+    var cached   = cache.get(cacheKey);
+    if (cached) {
+      try {
+        return { success: true, driverId: driverId, date: targetDate, points: JSON.parse(cached) };
+      } catch (_) {}
+    }
+
+    var displayPoints = points;
+    var waypoints     = simplifyRoutePoints_(points, 100);
+    var snapped       = snapToRoads_(waypoints);
+    if (snapped && snapped.length > 1) displayPoints = snapped;
+
+    try { cache.put(cacheKey, JSON.stringify(displayPoints), 300); } catch (_) {}
+    return { success: true, driverId: driverId, date: targetDate, points: displayPoints };
   } catch (err) {
     return { error: err.message };
   }
+}
+
+// Reduce a GPS points array to at most maxCount evenly-spaced waypoints (preserves first + last)
+function simplifyRoutePoints_(points, maxCount) {
+  if (points.length <= maxCount) return points;
+  var step = Math.ceil(points.length / maxCount);
+  var out  = [];
+  for (var i = 0; i < points.length; i += step) out.push(points[i]);
+  var last = points[points.length - 1];
+  if (out[out.length - 1] !== last) out.push(last);
+  return out;
+}
+
+// Call Google Maps Roads API snapToRoads with interpolate=true.
+// API key must be stored in GAS Script Properties as ROADS_API_KEY.
+// Returns snapped points array or null on any failure (caller falls back to raw GPS).
+function snapToRoads_(points) {
+  try {
+    var key = PropertiesService.getScriptProperties().getProperty('ROADS_API_KEY');
+    if (!key) return null;
+    var path = points.map(function(p) { return p.lat + ',' + p.lng; }).join('|');
+    var url  = 'https://roads.googleapis.com/v1/snapToRoads?path='
+               + encodeURIComponent(path) + '&interpolate=true&key=' + key;
+    var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
+    if (resp.getResponseCode() !== 200) return null;
+    var data = JSON.parse(resp.getContentText());
+    if (!data.snappedPoints || !data.snappedPoints.length) return null;
+    return data.snappedPoints.map(function(sp) {
+      return { lat: sp.location.latitude, lng: sp.location.longitude, km: 0 };
+    });
+  } catch (e) { return null; }
 }
 
 // =============================================================================

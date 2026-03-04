@@ -129,6 +129,13 @@ export async function saveGpsPoint(driverId, driverName, lat, lng, kmTotal, shif
   return post('saveGpsPoint', { data: { driverId, driverName, lat, lng, kmTotal, shiftRowId: shiftRowId || '' } });
 }
 
+// Batch version — sends an array of buffered GPS points in a single GAS call.
+// Each point: { userId, userName, lat, lng, km, ts, shiftRowId }
+export async function saveGpsPointsBatch(points) {
+  if (!points || points.length === 0) return;
+  return post('saveGpsPointsBatch', { data: { points } });
+}
+
 // Push auto-detected facility-left time (500m) to Column Q in GAS
 // Called from GPS background task when departure is detected AFTER Stage 2 submission
 export async function updateFacilityLeft(rowId, facilityLeftTime) {

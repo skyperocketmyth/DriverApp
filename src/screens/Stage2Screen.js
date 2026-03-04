@@ -14,9 +14,8 @@ import AutocompleteInput from '../components/AutocompleteInput';
 import CameraCapture from '../components/CameraCapture';
 import DateTimePicker from '../components/DateTimePicker';
 import GpsBanner from './GpsBanner';
-import * as Location from 'expo-location';
-import { saveDeparture, saveGpsPoint } from '../services/api';
-import { getAutoFacilityLeftTime, getLiveGpsStats } from '../services/gps';
+import { saveDeparture } from '../services/api';
+import { getAutoFacilityLeftTime } from '../services/gps';
 import { COLORS } from '../config';
 import { t, isRTL } from '../i18n/translations';
 
@@ -75,29 +74,7 @@ export default function Stage2Screen({ navigation }) {
     return () => clearInterval(poll);
   }, []);
 
-  // Foreground GPS heartbeat — push position to GAS every 30s while on this screen.
-  // Backup for background task which may be killed by Android battery optimisation.
-  useEffect(() => {
-    if (!currentUser?.userId || !shiftProgress?.stage1Done) return;
-
-    async function pushGpsPoint() {
-      try {
-        const pos   = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-        const stats = await getLiveGpsStats();
-        saveGpsPoint(
-          currentUser.userId,
-          currentUser.userName,
-          pos.coords.latitude,
-          pos.coords.longitude,
-          stats.totalKm || 0
-        ).catch(() => {});
-      } catch (_) {}
-    }
-
-    pushGpsPoint(); // immediate push on mount
-    const interval = setInterval(pushGpsPoint, 30000);
-    return () => clearInterval(interval);
-  }, []);
+  // GPS background task writes directly to Firebase — no heartbeat needed here.
 
   async function loadAutoGpsTime() {
     try {

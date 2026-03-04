@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "740578243967",
+    "firebase_url": "https://warehouse-stock-take-default-rtdb.firebaseio.com",
+    "project_id": "warehouse-stock-take",
+    "storage_bucket": "warehouse-stock-take.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:740578243967:android:2fe7247ebf9d51180fd64a",
+        "android_client_info": {
+          "package_name": "com.rsa.driverpilot"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCTJcr0Yar3DIHLE36Pm6e3kdsFCIyt56k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

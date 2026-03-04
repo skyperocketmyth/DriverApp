@@ -9,9 +9,7 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { useAppContext } from '../store/AppContext';
-import * as Location from 'expo-location';
 import { getLiveGpsStats } from '../services/gps';
-import { saveGpsPoint } from '../services/api';
 import { COLORS } from '../config';
 import { t, isRTL } from '../i18n/translations';
 
@@ -85,21 +83,7 @@ export default function HomeScreen({ navigation }) {
       const stats = await getLiveGpsStats();
       setLiveKm(stats.totalKm || 0);
 
-      // Foreground GPS heartbeat — push current position to GAS as backup for background task.
-      // Fire-and-forget: don't block the UI or the 15s interval.
-      if (currentUser?.userId) {
-        Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced })
-          .then(pos => {
-            saveGpsPoint(
-              currentUser.userId,
-              currentUser.userName,
-              pos.coords.latitude,
-              pos.coords.longitude,
-              stats.totalKm || 0
-            ).catch(() => {});
-          })
-          .catch(() => {});
-      }
+      // Firebase background task writes GPS points directly — nothing to flush here.
     } catch (_) {}
   }
 

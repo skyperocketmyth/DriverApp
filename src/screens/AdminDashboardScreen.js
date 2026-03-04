@@ -10,7 +10,8 @@ import {
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
 import { BarChart, LineChart } from 'react-native-chart-kit';
-import { fetchAdminDashboard, fetchLiveOperations, fetchActiveDriversLive, fetchDriverRoute } from '../services/api';
+import { fetchAdminDashboard, fetchLiveOperations } from '../services/api';
+import { subscribeToLivePositions, fetchShiftRoute } from '../services/firebase';
 import MapView, { Marker, Polyline, Callout } from 'react-native-maps';
 import { FACILITY } from '../config';
 import { COLORS } from '../config';
@@ -38,7 +39,7 @@ function filterRouteOutliers(points) {
       + Math.cos(prev.latitude * Math.PI / 180) * Math.cos(points[i].latitude * Math.PI / 180)
       * Math.sin(dLng / 2) ** 2;
     const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    if (dist < 2000) filtered.push(points[i]);
+    if (dist < 300) filtered.push(points[i]);
   }
   return filtered;
 }
@@ -377,24 +378,20 @@ function HelpersTab({ data }) {
   );
 }
 
-// ── Tab: Live Map ──
+// ── Tab: Live Map (Firebase Realtime Database) ──
+// Driver positions push via Firebase onValue listener — no polling needed.
+// Routes fetched on-demand from Firebase when a driver is selected.
 function MapTab({ liveOpsData }) {
   const [drivers,    setDrivers]    = useState([]);
   const [routes,     setRoutes]     = useState({});  // { driverId: [{latitude, longitude}] }
-  const [selectedId, setSelectedId] = useState(null); // null = all drivers
+  const [selectedId, setSelectedId] = useState(null);
   const [loading,    setLoading]    = useState(true);
   const [lastUpdate, setLastUpdate] = useState(null);
-  const mapRef   = useRef(null);
-  const colorMap = useRef({});        // stable color assignment per driverId
-  const today    = new Date().toISOString().slice(0, 10);
+  const mapRef      = useRef(null);
+  const colorMap    = useRef({});
+  const routeCache  = useRef({});   // shiftRowId → points (avoid re-fetching)
+  const fittedOnce  = useRef(false);
 
-  useEffect(() => {
-    loadMap();
-    const interval = setInterval(() => loadMap(true), 15000);
-    return () => clearInterval(interval);
-  }, []);
-
-  // Returns a stable colour for a given driverId
   function getColor(driverId) {
     if (!colorMap.current[driverId]) {
       const idx = Object.keys(colorMap.current).length;
@@ -403,46 +400,62 @@ function MapTab({ liveOpsData }) {
     return colorMap.current[driverId];
   }
 
-  async function loadMap(silent = false) {
-    if (!silent) setLoading(true);
-    try {
-      const result = await fetchActiveDriversLive();
-      if (!result.success) { setLoading(false); return; }
-      const live = result.drivers || [];
-
-      // Enrich with vehicle + stage from liveOps (join on driverName)
+  // Subscribe to Firebase live positions — fires on every driver position update
+  useEffect(() => {
+    const unsubscribe = subscribeToLivePositions(async (firebaseDrivers) => {
+      // Enrich with vehicle + stage from GAS live ops (join on driverName)
       const ops = liveOpsData || [];
-      const enriched = live.map(d => {
+      const enriched = firebaseDrivers.map(d => {
         const op = ops.find(o => o.driverName === d.driverName);
         return { ...d, vehicle: op?.vehicle || '', currentStage: op?.currentStage };
       });
       setDrivers(enriched);
-
-      // Fetch every driver's route for today filtered to their current shift
-      const routeResults = await Promise.all(
-        live.map(d =>
-          fetchDriverRoute(d.driverId, today, d.shiftRowId)
-            .then(r => ({
-              driverId: d.driverId,
-              points: filterRouteOutliers(
-                (r.points || []).map(p => ({ latitude: p.lat, longitude: p.lng }))
-              ),
-            }))
-            .catch(() => ({ driverId: d.driverId, points: [] }))
-        )
-      );
-      const routeMap = {};
-      routeResults.forEach(r => { routeMap[r.driverId] = r.points; });
-      setRoutes(routeMap);
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
+      setLoading(false);
 
-      // Auto-fit to all drivers on first load only
-      if (!silent) {
-        setTimeout(() => fitMap(enriched, routeMap, null), 400);
+      // Fetch routes for any driver whose shiftRowId we haven't loaded yet
+      const newRoutes = { ...routeCache.current };
+      let routeChanged = false;
+      await Promise.all(
+        firebaseDrivers
+          .filter(d => d.shiftRowId && !routeCache.current[d.shiftRowId])
+          .map(async d => {
+            const raw = await fetchShiftRoute(d.shiftRowId);
+            const pts = filterRouteOutliers(raw.map(p => ({ latitude: p.lat, longitude: p.lng })));
+            newRoutes[d.shiftRowId] = pts;
+            routeCache.current[d.shiftRowId] = pts;
+            routeChanged = true;
+          })
+      );
+      if (routeChanged) {
+        // Build driverId → points map for rendering
+        const routeMap = {};
+        firebaseDrivers.forEach(d => {
+          if (d.shiftRowId && routeCache.current[d.shiftRowId]) {
+            routeMap[d.driverId] = routeCache.current[d.shiftRowId];
+          }
+        });
+        setRoutes(routeMap);
+        if (!fittedOnce.current) {
+          fittedOnce.current = true;
+          setTimeout(() => fitMap(enriched, routeMap, null), 400);
+        }
       }
-    } catch (_) {}
-    setLoading(false);
-  }
+    });
+    return unsubscribe;
+  }, [liveOpsData]);
+
+  // Re-fetch route when a driver is selected (in case cache is stale)
+  useEffect(() => {
+    if (!selectedId) return;
+    const driver = drivers.find(d => d.driverId === selectedId);
+    if (!driver?.shiftRowId) return;
+    fetchShiftRoute(driver.shiftRowId).then(raw => {
+      const pts = filterRouteOutliers(raw.map(p => ({ latitude: p.lat, longitude: p.lng })));
+      routeCache.current[driver.shiftRowId] = pts;
+      setRoutes(prev => ({ ...prev, [driver.driverId]: pts }));
+    }).catch(() => {});
+  }, [selectedId]);
 
   function fitMap(driverList, routeMap, focusId) {
     if (!mapRef.current) return;
@@ -474,7 +487,6 @@ function MapTab({ liveOpsData }) {
         style={styles.filterBar}
         contentContainerStyle={styles.filterBarContent}
       >
-        {/* "All Drivers" chip */}
         <TouchableOpacity
           style={[styles.filterChip, !selectedId && styles.filterChipActive]}
           onPress={() => { setSelectedId(null); fitMap(drivers, routes, null); }}
@@ -484,7 +496,6 @@ function MapTab({ liveOpsData }) {
           </Text>
         </TouchableOpacity>
 
-        {/* One chip per active driver */}
         {drivers.map(d => {
           const color    = getColor(d.driverId);
           const isActive = selectedId === d.driverId;
@@ -540,7 +551,7 @@ function MapTab({ liveOpsData }) {
               key={`route-${d.driverId}`}
               coordinates={pts}
               strokeColor={getColor(d.driverId)}
-              strokeWidth={3}
+              strokeWidth={4}
             />
           );
         })}
@@ -553,6 +564,7 @@ function MapTab({ liveOpsData }) {
               key={`driver-${d.driverId}`}
               coordinate={{ latitude: d.lat, longitude: d.lng }}
               anchor={{ x: 0.5, y: 0.5 }}
+              tracksViewChanges={false}
             >
               <View style={[styles.truckMarker, { backgroundColor: color }]}>
                 <Text style={styles.truckIcon}>🚚</Text>
@@ -561,11 +573,11 @@ function MapTab({ liveOpsData }) {
                 <View style={styles.calloutBox}>
                   <Text style={styles.calloutTitle}>{d.driverName}</Text>
                   {d.vehicle ? <Text style={styles.calloutRow}>🚗 {d.vehicle}</Text> : null}
-                  <Text style={styles.calloutRow}>📍 {(d.kmTotal || 0).toFixed(1)} km</Text>
+                  <Text style={styles.calloutRow}>📍 {(d.km || 0).toFixed(1)} km</Text>
                   {d.currentStage != null
                     ? <Text style={styles.calloutRow}>📋 Stage {d.currentStage}: {STAGE_NAMES[d.currentStage] || ''}</Text>
                     : null}
-                  <Text style={styles.calloutRow}>🕐 {d.timestamp}</Text>
+                  <Text style={styles.calloutRow}>🕐 {d.ts ? d.ts.slice(11, 19) : ''}</Text>
                 </View>
               </Callout>
             </Marker>
@@ -576,12 +588,9 @@ function MapTab({ liveOpsData }) {
       {/* ── Bottom info bar ── */}
       <View style={styles.mapInfo}>
         <Text style={styles.mapInfoText}>
-          {displayDrivers.length} driver{displayDrivers.length !== 1 ? 's' : ''} on map
-          {lastUpdate ? `  ·  Updated ${lastUpdate}` : ''}
+          {displayDrivers.length} driver{displayDrivers.length !== 1 ? 's' : ''} · Live
+          {lastUpdate ? `  ·  ${lastUpdate}` : ''}
         </Text>
-        <TouchableOpacity onPress={() => loadMap(true)} style={styles.mapRefreshBtn}>
-          <Text style={styles.mapRefreshBtnText}>↻ Refresh</Text>
-        </TouchableOpacity>
       </View>
 
       {loading && (
