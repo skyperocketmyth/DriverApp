@@ -16,7 +16,7 @@ const ATTENDANCE_SHEET = 'Attendance Data';
 const USERNAMES_SHEET  = 'Usernames';
 const OVERTIME_HOURS   = 9;
 const TIMEZONE         = 'Asia/Dubai';
-const GOOGLE_MAPS_API_KEY = 'AIzaSyCkwplnJDtC5yjj8vmkiaWCBz05VJLjKl8';
+const GOOGLE_MAPS_API_KEY = 'AIzaSyD5wyeJHiWeqxXCczmw-SfbQ6p9UXOQf_A';
 
 // Attendance Data column numbers (1-based, matching sheet columns A–Z)
 // COLUMN ORDER (26 cols):  A–O unchanged, then:
