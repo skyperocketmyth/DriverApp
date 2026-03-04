@@ -1,6 +1,6 @@
 // RSA Admin — Service Worker
 // Caches the app shell so it loads offline; never caches GAS API calls.
-const CACHE_NAME = 'rsa-admin-v1';
+const CACHE_NAME = 'rsa-admin-v2';
 const SHELL = ['./'];
 
 self.addEventListener('install', function(e) {
