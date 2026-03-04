@@ -13,7 +13,7 @@ import {
 import * as IntentLauncher from 'expo-intent-launcher';
 import { useAppContext } from '../store/AppContext';
 import { checkFacilityGeofence, requestLocationPermissions, startShiftTracking } from '../services/gps';
-import { saveShiftStart } from '../services/api';
+import { saveShiftStart, saveGpsPoint } from '../services/api';
 import { COLORS } from '../config';
 import { t, isRTL } from '../i18n/translations';
 
@@ -130,6 +130,10 @@ export default function Stage1ArrivalScreen({ navigation }) {
         startLng:    arrivalCoords.lng,
       };
       await setShiftProgress(progress);
+
+      // Push first GPS point immediately so GPS_Tracking has an entry right away.
+      // Background task may take up to 15s to fire its first update; this closes that gap.
+      saveGpsPoint(currentUser.userId, currentUser.userName, arrivalCoords.lat, arrivalCoords.lng, 0).catch(() => {});
 
       // Navigate to Success immediately — data is confirmed saved
       navigation.replace('Success', {

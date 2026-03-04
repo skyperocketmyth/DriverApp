@@ -159,6 +159,19 @@
   var adminPass = "";
   var adminId   = "";
 
+  // Restore session from localStorage on page load
+  (function() {
+    var sid = localStorage.getItem("rsa_admin_id");
+    var spw = localStorage.getItem("rsa_admin_pw");
+    if (sid && spw) {
+      adminId = sid; adminPass = spw;
+      document.getElementById("login-screen").style.display = "none";
+      document.getElementById("dashboard").style.display    = "block";
+      document.getElementById("topbar-date").textContent    = new Date().toLocaleDateString("en-GB");
+      loadDashboard();
+    }
+  })();
+
   function doLogin() {
     var uid = document.getElementById("l-uid").value.trim();
     var pw  = document.getElementById("l-pw").value.trim();
@@ -174,6 +187,8 @@
         if (!d.isAdmin) { document.getElementById("l-err").textContent = "Admin access only."; return; }
         adminId   = uid;
         adminPass = pw;
+        localStorage.setItem("rsa_admin_id", uid);
+        localStorage.setItem("rsa_admin_pw", pw);
         document.getElementById("login-screen").style.display = "none";
         document.getElementById("dashboard").style.display    = "block";
         document.getElementById("topbar-date").textContent    = new Date().toLocaleDateString("en-GB");
@@ -185,6 +200,8 @@
 
   function doLogout() {
     adminId = ""; adminPass = "";
+    localStorage.removeItem("rsa_admin_id");
+    localStorage.removeItem("rsa_admin_pw");
     document.getElementById("dashboard").style.display    = "none";
     document.getElementById("login-screen").style.display = "flex";
   }
@@ -305,6 +322,21 @@
   var FACILITY_LAT = 24.903892;
   var FACILITY_LNG = 55.114065;
 
+  function filterRouteOutliers(points) {
+    if (points.length < 2) return points;
+    var R = 6371000;
+    var filtered = [points[0]];
+    for (var i = 1; i < points.length; i++) {
+      var prev = filtered[filtered.length - 1];
+      var dLat = (points[i].lat - prev.lat) * Math.PI / 180;
+      var dLng = (points[i].lng - prev.lng) * Math.PI / 180;
+      var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(prev.lat*Math.PI/180)*Math.cos(points[i].lat*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
+      var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+      if (dist < 2000) filtered.push(points[i]);
+    }
+    return filtered;
+  }
+
   function getMapColor(driverId) {
     if (!mapColorMap[driverId]) {
       var idx = Object.keys(mapColorMap).length;
@@ -333,7 +365,7 @@
       position: { lat: FACILITY_LAT, lng: FACILITY_LNG },
       map: googleMap,
       title: "RSA Facility",
-      icon: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+      icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 52" width="48" height="52"><text x="50%" y="46" dominant-baseline="middle" text-anchor="middle" font-size="40">\uD83C\uDFE0</text></svg>'), scaledSize: new google.maps.Size(48, 52), anchor: new google.maps.Point(24, 52) },
       zIndex: 100,
     });
     loadMapData();
@@ -347,7 +379,7 @@
         if (!result.success) return;
         mapDriversData = result.drivers || [];
         var promises = mapDriversData.map(function(d) {
-          return fetch(GAS_URL + "?action=getDriverRoute&driverId=" + encodeURIComponent(d.driverId) + "&date=" + encodeURIComponent(today))
+          return fetch(GAS_URL + "?action=getDriverRoute&driverId=" + encodeURIComponent(d.driverId) + "&date=" + encodeURIComponent(today) + (d.shiftRowId ? "&shiftRowId=" + encodeURIComponent(d.shiftRowId) : ""))
             .then(function(r) { return r.json(); })
             .then(function(r) { return { driverId: d.driverId, points: r.points || [] }; })
             .catch(function() { return { driverId: d.driverId, points: [] }; });
@@ -374,7 +406,8 @@
     bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });
     display.forEach(function(d) {
       var color = getMapColor(d.driverId);
-      var pts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });
+      var rawPts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });
+      var pts = filterRouteOutliers(rawPts);
       if (pts.length >= 2) {
         mapPolylines[d.driverId] = new google.maps.Polyline({
           path: pts, geodesic: true,
@@ -383,16 +416,17 @@
         pts.forEach(function(p) { bounds.extend(p); });
       }
       if (d.lat && d.lng) {
-        var iw = new google.maps.InfoWindow({
-          content: "<div style='padding:6px;min-width:180px'><strong>" + d.driverName + "</strong><br>" +
-            (d.kmTotal||0).toFixed(1) + " km" + (d.vehicle ? " &middot; " + d.vehicle : "") + "<br>" +
-            "<span style='color:#888;font-size:11px'>" + d.timestamp + "</span></div>",
-        });
+        var iwContent = "<div style='padding:8px;min-width:190px;font-family:sans-serif'>" +
+          "<strong style='font-size:14px'>" + d.driverName + "</strong><br>" +
+          "\uD83D\uDE9A " + (d.vehicle || "—") + "<br>" +
+          "\uD83D\uDCCD " + (d.kmTotal||0).toFixed(1) + " km<br>" +
+          "\uD83D\uDD50 <span style='color:#888;font-size:11px'>" + d.timestamp + "</span></div>";
+        var iw = new google.maps.InfoWindow({ content: iwContent });
+        var truckSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40"><circle cx="20" cy="20" r="19" fill="' + color + '" stroke="#fff" stroke-width="2"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="20">\uD83D\uDE9A</text></svg>';
         var marker = new google.maps.Marker({
           position: { lat: d.lat, lng: d.lng },
           map: googleMap, title: d.driverName,
-          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 10,
-            fillColor: color, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 2 },
+          icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(truckSvg), scaledSize: new google.maps.Size(40, 40), anchor: new google.maps.Point(20, 20) },
           zIndex: 200,
         });
         (function(mk, iwin) { mk.addListener("click", function() { iwin.open(googleMap, mk); }); })(marker, iw);

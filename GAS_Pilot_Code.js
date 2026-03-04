@@ -103,7 +103,7 @@ function doGet(e) {
     } else if (action === 'getActiveDriversLive') {
       result = getActiveDriversLive();
     } else if (action === 'getDriverRoute') {
-      result = getDriverRoute(param.driverId, param.date);
+      result = getDriverRoute(param.driverId, param.date, param.shiftRowId);
     } else {
       result = { error: 'Unknown action: ' + action };
     }
@@ -1230,7 +1230,7 @@ function getLiveOperations() {
 // =============================================================================
 
 var GPS_TRACKING_SHEET = 'GPS_Tracking';
-var GPS_TRACKING_HEADERS = ['DRIVER_ID', 'DRIVER_NAME', 'TIMESTAMP', 'LAT', 'LNG', 'KM_TOTAL', 'SHIFT_DATE'];
+var GPS_TRACKING_HEADERS = ['DRIVER_ID', 'DRIVER_NAME', 'TIMESTAMP', 'LAT', 'LNG', 'KM_TOTAL', 'SHIFT_DATE', 'SHIFT_ROW_ID'];
 
 function getOrCreateGpsTrackingSheet_() {
   var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
@@ -1260,7 +1260,8 @@ function saveGpsPoint(data) {
       Number(data.lat) || 0,
       Number(data.lng) || 0,
       Math.round(Number(data.kmTotal) * 100) / 100 || 0,
-      shiftDate
+      shiftDate,
+      data.shiftRowId || ''
     ]);
     return { success: true };
   } catch (err) {
@@ -1276,7 +1277,7 @@ function getActiveDriversLive() {
     if (lastRow < 2) return { success: true, drivers: [] };
 
     var today  = formatDateOnly_(new Date());
-    var values = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+    var values = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
 
     var latestByDriver = {};
     values.forEach(function(row) {
@@ -1295,7 +1296,8 @@ function getActiveDriversLive() {
         timestamp:  (row[2] instanceof Date) ? formatDubai_(row[2]) : String(row[2]).trim(),
         lat:        Number(row[3]),
         lng:        Number(row[4]),
-        kmTotal:    Number(row[5])
+        kmTotal:    Number(row[5]),
+        shiftRowId: String(row[7]).trim()
       };
     });
 
@@ -1306,7 +1308,8 @@ function getActiveDriversLive() {
 }
 
 // Returns all GPS points for a specific driver on a specific date (dd/MM/yyyy or YYYY-MM-DD)
-function getDriverRoute(driverId, dateStr) {
+// Optional shiftRowId filters to a single shift (when a driver runs multiple shifts per day)
+function getDriverRoute(driverId, dateStr, shiftRowId) {
   try {
     var sheet   = getOrCreateGpsTrackingSheet_();
     var lastRow = sheet.getLastRow();
@@ -1319,7 +1322,7 @@ function getDriverRoute(driverId, dateStr) {
       targetDate = dp[2] + '/' + dp[1] + '/' + dp[0];
     }
 
-    var values = sheet.getRange(2, 1, lastRow - 1, 7).getValues();
+    var values = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
     var points = [];
     values.forEach(function(row) {
       if (String(row[0]).trim() !== driverId) return;
@@ -1329,6 +1332,8 @@ function getDriverRoute(driverId, dateStr) {
         ? formatDateOnly_(shiftDateVal)
         : String(shiftDateVal).trim();
       if (rowDate !== targetDate) return;
+      // If shiftRowId provided, only include points from that shift
+      if (shiftRowId && String(row[7]).trim() && String(row[7]).trim() !== String(shiftRowId)) return;
       var ts = (row[2] instanceof Date) ? formatDubai_(row[2]) : String(row[2]).trim();
       points.push({ timestamp: ts, lat: Number(row[3]), lng: Number(row[4]), km: Number(row[5]) });
     });
@@ -1502,6 +1507,19 @@ function getAdminHtml_() {
 '  var adminPass = "";\n' +
 '  var adminId   = "";\n' +
 '\n' +
+'  // Restore session from localStorage on page load\n' +
+'  (function() {\n' +
+'    var sid = localStorage.getItem("rsa_admin_id");\n' +
+'    var spw = localStorage.getItem("rsa_admin_pw");\n' +
+'    if (sid && spw) {\n' +
+'      adminId = sid; adminPass = spw;\n' +
+'      document.getElementById("login-screen").style.display = "none";\n' +
+'      document.getElementById("dashboard").style.display    = "block";\n' +
+'      document.getElementById("topbar-date").textContent    = new Date().toLocaleDateString("en-GB");\n' +
+'      loadDashboard();\n' +
+'    }\n' +
+'  })();\n' +
+'\n' +
 '  function doLogin() {\n' +
 '    var uid = document.getElementById("l-uid").value.trim();\n' +
 '    var pw  = document.getElementById("l-pw").value.trim();\n' +
@@ -1517,6 +1535,8 @@ function getAdminHtml_() {
 '        if (!d.isAdmin) { document.getElementById("l-err").textContent = "Admin access only."; return; }\n' +
 '        adminId   = uid;\n' +
 '        adminPass = pw;\n' +
+'        localStorage.setItem("rsa_admin_id", uid);\n' +
+'        localStorage.setItem("rsa_admin_pw", pw);\n' +
 '        document.getElementById("login-screen").style.display = "none";\n' +
 '        document.getElementById("dashboard").style.display    = "block";\n' +
 '        document.getElementById("topbar-date").textContent    = new Date().toLocaleDateString("en-GB");\n' +
@@ -1528,6 +1548,8 @@ function getAdminHtml_() {
 '\n' +
 '  function doLogout() {\n' +
 '    adminId = ""; adminPass = "";\n' +
+'    localStorage.removeItem("rsa_admin_id");\n' +
+'    localStorage.removeItem("rsa_admin_pw");\n' +
 '    document.getElementById("dashboard").style.display    = "none";\n' +
 '    document.getElementById("login-screen").style.display = "flex";\n' +
 '  }\n' +
@@ -1666,6 +1688,21 @@ function getAdminHtml_() {
 '    return mapColorMap[driverId];\n' +
 '  }\n' +
 '\n' +
+'  function filterRouteOutliers(points) {\n' +
+'    if (points.length < 2) return points;\n' +
+'    var R = 6371000;\n' +
+'    var filtered = [points[0]];\n' +
+'    for (var i = 1; i < points.length; i++) {\n' +
+'      var prev = filtered[filtered.length - 1];\n' +
+'      var dLat = (points[i].lat - prev.lat) * Math.PI / 180;\n' +
+'      var dLng = (points[i].lng - prev.lng) * Math.PI / 180;\n' +
+'      var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(prev.lat*Math.PI/180)*Math.cos(points[i].lat*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);\n' +
+'      var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));\n' +
+'      if (dist < 2000) filtered.push(points[i]);\n' +
+'    }\n' +
+'    return filtered;\n' +
+'  }\n' +
+'\n' +
 '  function loadGoogleMapsScript() {\n' +
 '    if (mapApiLoading) return;\n' +
 '    mapApiLoading = true;\n' +
@@ -1686,7 +1723,7 @@ function getAdminHtml_() {
 '      position: { lat: FACILITY_LAT, lng: FACILITY_LNG },\n' +
 '      map: googleMap,\n' +
 '      title: "RSA Facility",\n' +
-'      icon: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",\n' +
+'      icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(\'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 52" width="48" height="52"><text x="50%" y="46" dominant-baseline="middle" text-anchor="middle" font-size="40">\\uD83C\\uDFE0</text></svg>\'), scaledSize: new google.maps.Size(48, 52), anchor: new google.maps.Point(24, 52) },\n' +
 '      zIndex: 100,\n' +
 '    });\n' +
 '    loadMapData();\n' +
@@ -1700,7 +1737,7 @@ function getAdminHtml_() {
 '        if (!result.success) return;\n' +
 '        mapDriversData = result.drivers || [];\n' +
 '        var promises = mapDriversData.map(function(d) {\n' +
-'          return fetch(GAS_URL + "?action=getDriverRoute&driverId=" + encodeURIComponent(d.driverId) + "&date=" + encodeURIComponent(today))\n' +
+'          return fetch(GAS_URL + "?action=getDriverRoute&driverId=" + encodeURIComponent(d.driverId) + "&date=" + encodeURIComponent(today) + (d.shiftRowId ? "&shiftRowId=" + encodeURIComponent(d.shiftRowId) : ""))\n' +
 '            .then(function(r) { return r.json(); })\n' +
 '            .then(function(r) { return { driverId: d.driverId, points: r.points || [] }; })\n' +
 '            .catch(function() { return { driverId: d.driverId, points: [] }; });\n' +
@@ -1727,7 +1764,8 @@ function getAdminHtml_() {
 '    bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });\n' +
 '    display.forEach(function(d) {\n' +
 '      var color = getMapColor(d.driverId);\n' +
-'      var pts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
+'      var rawPts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
+'      var pts = filterRouteOutliers(rawPts);\n' +
 '      if (pts.length >= 2) {\n' +
 '        mapPolylines[d.driverId] = new google.maps.Polyline({\n' +
 '          path: pts, geodesic: true,\n' +
@@ -1736,16 +1774,18 @@ function getAdminHtml_() {
 '        pts.forEach(function(p) { bounds.extend(p); });\n' +
 '      }\n' +
 '      if (d.lat && d.lng) {\n' +
-'        var iw = new google.maps.InfoWindow({\n' +
-'          content: "<div style=\\"padding:6px;min-width:180px\\"><strong>" + d.driverName + "</strong><br>" +\n' +
-'            d.kmTotal.toFixed(1) + " km" + (d.vehicle ? " &middot; " + d.vehicle : "") + "<br>" +\n' +
-'            "<span style=\\"color:#888;font-size:11px\\">" + d.timestamp + "</span></div>",\n' +
-'        });\n' +
+'        var stageNames = ["","At Facility","On Road","Last Drop Done","Shift Complete"];\n' +
+'        var iwContent = "<div style=\\"padding:8px;min-width:190px;font-family:sans-serif\\">" +\n' +
+'          "<strong style=\\"font-size:14px\\">" + d.driverName + "</strong><br>" +\n' +
+'          "\\uD83D\\uDE9A " + (d.vehicle || "—") + "<br>" +\n' +
+'          "\\uD83D\\uDCCD " + d.kmTotal.toFixed(1) + " km<br>" +\n' +
+'          "\\uD83D\\uDD50 <span style=\\"color:#888;font-size:11px\\">" + d.timestamp + "</span></div>";\n' +
+'        var iw = new google.maps.InfoWindow({ content: iwContent });\n' +
+'        var truckSvg = \'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40"><circle cx="20" cy="20" r="19" fill="\' + color + \'" stroke="#fff" stroke-width="2"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="20">\\uD83D\\uDE9A</text></svg>\';\n' +
 '        var marker = new google.maps.Marker({\n' +
 '          position: { lat: d.lat, lng: d.lng },\n' +
 '          map: googleMap, title: d.driverName,\n' +
-'          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 10,\n' +
-'            fillColor: color, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 2 },\n' +
+'          icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(truckSvg), scaledSize: new google.maps.Size(40, 40), anchor: new google.maps.Point(20, 20) },\n' +
 '          zIndex: 200,\n' +
 '        });\n' +
 '        (function(mk, iwin) { mk.addListener("click", function() { iwin.open(googleMap, mk); }); })(marker, iw);\n' +

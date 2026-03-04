@@ -125,8 +125,8 @@ export async function fetchLiveOperations() {
 // =============================================================================
 // GPS Tracking — Live map endpoints
 // =============================================================================
-export async function saveGpsPoint(driverId, driverName, lat, lng, kmTotal) {
-  return post('saveGpsPoint', { data: { driverId, driverName, lat, lng, kmTotal } });
+export async function saveGpsPoint(driverId, driverName, lat, lng, kmTotal, shiftRowId) {
+  return post('saveGpsPoint', { data: { driverId, driverName, lat, lng, kmTotal, shiftRowId: shiftRowId || '' } });
 }
 
 // Push auto-detected facility-left time (500m) to Column Q in GAS
@@ -139,6 +139,6 @@ export async function fetchActiveDriversLive() {
   return get('getActiveDriversLive');
 }
 
-export async function fetchDriverRoute(driverId, date) {
-  return get('getDriverRoute', { driverId, date });
+export async function fetchDriverRoute(driverId, date, shiftRowId) {
+  return get('getDriverRoute', { driverId, date, ...(shiftRowId ? { shiftRowId } : {}) });
 }

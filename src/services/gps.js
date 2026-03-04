@@ -87,9 +87,10 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
         const totalKmStr = await AsyncStorage.getItem(KEY_TOTAL_KM);
         const totalKm    = totalKmStr ? parseFloat(totalKmStr) : 0;
         const userStr    = await AsyncStorage.getItem(KEY_GPS_USER);
+        const shiftRowId = await AsyncStorage.getItem(KEY_SHIFT_ROW_ID);
         if (userStr) {
           const user = JSON.parse(userStr);
-          saveGpsPoint(user.userId, user.userName, newLat, newLng, totalKm).catch(() => {});
+          saveGpsPoint(user.userId, user.userName, newLat, newLng, totalKm, shiftRowId || '').catch(() => {});
         }
       } catch (_) {
         // Non-fatal — don't interrupt local tracking if remote save fails

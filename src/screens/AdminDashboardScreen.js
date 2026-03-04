@@ -11,7 +11,7 @@ import {
 import { useFocusEffect } from '@react-navigation/native';
 import { BarChart, LineChart } from 'react-native-chart-kit';
 import { fetchAdminDashboard, fetchLiveOperations, fetchActiveDriversLive, fetchDriverRoute } from '../services/api';
-import MapView, { Marker, Polyline } from 'react-native-maps';
+import MapView, { Marker, Polyline, Callout } from 'react-native-maps';
 import { FACILITY } from '../config';
 import { COLORS } from '../config';
 
@@ -22,6 +22,27 @@ const DRIVER_COLORS = [
   '#E53935', '#7B1FA2', '#00897B', '#F57C00',
   '#0288D1', '#558B2F', '#AD1457', '#795548',
 ];
+
+const STAGE_NAMES = ['', 'At Facility', 'On Road', 'Last Drop Done', 'Shift Complete'];
+
+// Remove GPS jumps > 2 km between consecutive points (noise/outlier filter)
+function filterRouteOutliers(points) {
+  if (points.length < 2) return points;
+  const R = 6371000;
+  const filtered = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const prev = filtered[filtered.length - 1];
+    const dLat = (points[i].latitude - prev.latitude) * Math.PI / 180;
+    const dLng = (points[i].longitude - prev.longitude) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) ** 2
+      + Math.cos(prev.latitude * Math.PI / 180) * Math.cos(points[i].latitude * Math.PI / 180)
+      * Math.sin(dLng / 2) ** 2;
+    const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    if (dist < 2000) filtered.push(points[i]);
+  }
+  return filtered;
+}
+
 const CHART_W  = SCREEN_W - 48;
 
 const CHART_CONFIG = {
@@ -389,21 +410,23 @@ function MapTab({ liveOpsData }) {
       if (!result.success) { setLoading(false); return; }
       const live = result.drivers || [];
 
-      // Enrich with vehicle number from liveOps (join on driverName)
+      // Enrich with vehicle + stage from liveOps (join on driverName)
       const ops = liveOpsData || [];
       const enriched = live.map(d => {
         const op = ops.find(o => o.driverName === d.driverName);
-        return { ...d, vehicle: op?.vehicle || '' };
+        return { ...d, vehicle: op?.vehicle || '', currentStage: op?.currentStage };
       });
       setDrivers(enriched);
 
-      // Fetch every driver's full route for today in parallel
+      // Fetch every driver's route for today filtered to their current shift
       const routeResults = await Promise.all(
         live.map(d =>
-          fetchDriverRoute(d.driverId, today)
+          fetchDriverRoute(d.driverId, today, d.shiftRowId)
             .then(r => ({
               driverId: d.driverId,
-              points: (r.points || []).map(p => ({ latitude: p.lat, longitude: p.lng })),
+              points: filterRouteOutliers(
+                (r.points || []).map(p => ({ latitude: p.lat, longitude: p.lng }))
+              ),
             }))
             .catch(() => ({ driverId: d.driverId, points: [] }))
         )
@@ -495,12 +518,18 @@ function MapTab({ liveOpsData }) {
           longitudeDelta: 0.15,
         }}
       >
-        {/* Facility pin */}
+        {/* Facility home pin */}
         <Marker
           coordinate={{ latitude: FACILITY.lat, longitude: FACILITY.lng }}
-          title="RSA Facility"
-          pinColor="#0D47A1"
-        />
+          anchor={{ x: 0.5, y: 1 }}
+        >
+          <View style={styles.homeMarker}>
+            <Text style={styles.homeMarkerIcon}>🏠</Text>
+          </View>
+          <Callout>
+            <Text style={styles.calloutTitle}>RSA Facility</Text>
+          </Callout>
+        </Marker>
 
         {/* Route polyline per driver */}
         {displayDrivers.map(d => {
@@ -517,15 +546,31 @@ function MapTab({ liveOpsData }) {
         })}
 
         {/* Live position marker per driver */}
-        {displayDrivers.filter(d => d.lat != null && d.lng != null).map(d => (
-          <Marker
-            key={`driver-${d.driverId}`}
-            coordinate={{ latitude: d.lat, longitude: d.lng }}
-            title={d.driverName}
-            description={`${(d.kmTotal || 0).toFixed(1)} km${d.vehicle ? ' · ' + d.vehicle : ''} · ${d.timestamp}`}
-            pinColor={getColor(d.driverId)}
-          />
-        ))}
+        {displayDrivers.filter(d => d.lat != null && d.lng != null).map(d => {
+          const color = getColor(d.driverId);
+          return (
+            <Marker
+              key={`driver-${d.driverId}`}
+              coordinate={{ latitude: d.lat, longitude: d.lng }}
+              anchor={{ x: 0.5, y: 0.5 }}
+            >
+              <View style={[styles.truckMarker, { backgroundColor: color }]}>
+                <Text style={styles.truckIcon}>🚚</Text>
+              </View>
+              <Callout tooltip={false}>
+                <View style={styles.calloutBox}>
+                  <Text style={styles.calloutTitle}>{d.driverName}</Text>
+                  {d.vehicle ? <Text style={styles.calloutRow}>🚗 {d.vehicle}</Text> : null}
+                  <Text style={styles.calloutRow}>📍 {(d.kmTotal || 0).toFixed(1)} km</Text>
+                  {d.currentStage != null
+                    ? <Text style={styles.calloutRow}>📋 Stage {d.currentStage}: {STAGE_NAMES[d.currentStage] || ''}</Text>
+                    : null}
+                  <Text style={styles.calloutRow}>🕐 {d.timestamp}</Text>
+                </View>
+              </Callout>
+            </Marker>
+          );
+        })}
       </MapView>
 
       {/* ── Bottom info bar ── */}
@@ -766,4 +811,15 @@ const styles = StyleSheet.create({
   mapInfoText: { flex: 1, fontSize: 12, color: COLORS.textMid },
   mapRefreshBtn: { backgroundColor: COLORS.primary, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 6 },
   mapRefreshBtnText: { color: COLORS.white, fontSize: 12, fontWeight: '700' },
+
+  // Custom map markers
+  truckMarker: { width: 38, height: 38, borderRadius: 19, justifyContent: 'center', alignItems: 'center', elevation: 4, shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 3, shadowOffset: { width: 0, height: 2 } },
+  truckIcon:   { fontSize: 22 },
+  homeMarker:  { width: 44, height: 44, justifyContent: 'center', alignItems: 'center' },
+  homeMarkerIcon: { fontSize: 32 },
+
+  // Callout popup
+  calloutBox:  { minWidth: 190, maxWidth: 260, padding: 10 },
+  calloutTitle: { fontWeight: '700', fontSize: 14, color: '#1a1a1a', marginBottom: 5 },
+  calloutRow:  { fontSize: 12, color: '#555', marginTop: 3 },
 });
