@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "DriverAppPilot2",
-    "slug": "DriverAppPilot2",
+    "name": "RSA Driver Pilot",
+    "slug": "rsa-driver-pilot",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
@@ -9,21 +9,73 @@
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
-      "backgroundColor": "#ffffff"
+      "backgroundColor": "#0D47A1"
     },
     "ios": {
-      "supportsTablet": true
+      "supportsTablet": false,
+      "bundleIdentifier": "com.rsa.driverpilot",
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "RSA Driver Pilot needs your location to verify you are at the facility and to track your shift distance.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "RSA Driver Pilot needs background location to track km travelled and record when you leave the facility during your shift.",
+        "NSCameraUsageDescription": "RSA Driver Pilot needs camera access to capture odometer photos."
+      }
     },
     "android": {
+      "package": "com.rsa.driverpilot",
+      "config": {
+        "googleMaps": {
+          "apiKey": "AIzaSyCkwplnJDtC5yjj8vmkiaWCBz05VJLjKl8"
+        }
+      },
       "adaptiveIcon": {
-        "backgroundColor": "#E6F4FE",
         "foregroundImage": "./assets/android-icon-foreground.png",
         "backgroundImage": "./assets/android-icon-background.png",
-        "monochromeImage": "./assets/android-icon-monochrome.png"
-      }
+        "monochromeImage": "./assets/android-icon-monochrome.png",
+        "backgroundColor": "#0D47A1"
+      },
+      "permissions": [
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.ACCESS_BACKGROUND_LOCATION",
+        "android.permission.CAMERA",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_LOCATION",
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "runtimeVersion": {
+      "policy": "sdkVersion"
+    },
+    "updates": {
+      "url": "https://u.expo.dev/a33a4524-41f0-4303-99ab-517ef9fb0ceb"
+    },
+    "plugins": [
+      [
+        "expo-location",
+        {
+          "locationAlwaysAndWhenInUsePermission": "RSA Driver Pilot needs location to verify facility arrival and track shift distance.",
+          "locationAlwaysPermission": "Allow RSA Driver Pilot to track your location in the background during active shifts.",
+          "isIosBackgroundLocationEnabled": true,
+          "isAndroidBackgroundLocationEnabled": true
+        }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "RSA Driver Pilot needs camera access to capture odometer photos."
+        }
+      ],
+      "expo-updates"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "a33a4524-41f0-4303-99ab-517ef9fb0ceb"
+      }
     }
   }
 }

@@ -1,0 +1,465 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RSA Driver Pilot — Admin Dashboard</title>
+  <link rel="manifest" href="manifest.json">
+  <meta name="theme-color" content="#0D47A1">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="RSA Admin">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #F5F7FA; color: #1A1A2E; }
+    #login-screen { display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
+    .login-card { background: #fff; border-radius: 16px; padding: 40px; width: 340px; box-shadow: 0 4px 24px rgba(0,0,0,0.10); }
+    .login-card h1 { font-size: 22px; font-weight: 800; color: #0D47A1; margin-bottom: 8px; }
+    .login-card p { color: #666; font-size: 13px; margin-bottom: 24px; }
+    .login-card input { width: 100%; border: 1.5px solid #DDD; border-radius: 8px; padding: 12px 14px; font-size: 15px; margin-bottom: 14px; }
+    .login-card button { width: 100%; background: #0D47A1; color: #fff; border: none; border-radius: 8px; padding: 14px; font-size: 16px; font-weight: 700; cursor: pointer; }
+    .login-card .err { color: #C62828; font-size: 13px; margin-top: 10px; }
+    #dashboard { display: none; }
+    .topbar { background: #0D47A1; color: #fff; padding: 14px 24px; display: flex; align-items: center; justify-content: space-between; }
+    .topbar h1 { font-size: 18px; font-weight: 800; }
+    .topbar button { background: rgba(255,255,255,0.2); color: #fff; border: none; border-radius: 6px; padding: 8px 14px; cursor: pointer; font-size: 13px; }
+    .tabs { display: flex; gap: 4px; background: #fff; padding: 12px 24px; border-bottom: 1px solid #EEE; overflow-x: auto; }
+    .tab { padding: 8px 16px; border-radius: 8px; cursor: pointer; font-size: 13px; font-weight: 600; color: #666; white-space: nowrap; }
+    .tab.active { background: #0D47A1; color: #fff; }
+    .panel { display: none; padding: 24px; }
+    .panel.active { display: block; }
+    .cards { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
+    .card { background: #fff; border-radius: 12px; padding: 18px 22px; flex: 1; min-width: 160px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    .card .val { font-size: 28px; font-weight: 900; color: #0D47A1; }
+    .card .lbl { font-size: 12px; color: #888; margin-top: 4px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; }
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }
+    th { background: #E8EEF7; color: #0D47A1; font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: 0.5px; padding: 10px 14px; text-align: left; }
+    td { padding: 10px 14px; font-size: 13px; border-bottom: 1px solid #F0F0F0; }
+    tr:last-child td { border-bottom: none; }
+    tr:nth-child(even) td { background: #FAFAFA; }
+    .stage-pill { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; }
+    .s1 { background: #E3F2FD; color: #1565C0; }
+    .s2 { background: #F3E5F5; color: #6A1B9A; }
+    .s3 { background: #FFF8E1; color: #F57F17; }
+    .s4 { background: #E8F5E9; color: #2E7D32; }
+    .section-title { font-size: 12px; font-weight: 800; color: #888; text-transform: uppercase; letter-spacing: 0.8px; margin: 20px 0 10px; }
+    .refresh-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }
+    .refresh-btn { background: #E8EEF7; border: none; border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 13px; font-weight: 600; color: #0D47A1; }
+    .as-of { color: #888; font-size: 12px; margin-left: 12px; }
+    #map-container { width: 100%; height: 520px; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .map-filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+    .map-chip { padding: 6px 14px; border-radius: 16px; border: 1.5px solid #DDD; background: #fff; color: #555; cursor: pointer; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }
+    .map-chip.all-active { background: #0D47A1; border-color: #0D47A1; color: #fff; }
+    .map-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+    .map-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+    @media (max-width: 600px) { .cards { flex-direction: column; } .panel { padding: 12px; } #map-container { height: 360px; } }
+    .spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,0.4); border-radius:50%; border-top-color:#fff; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:6px; }
+    @keyframes spin { to { transform:rotate(360deg); } }
+  </style>
+</head>
+<body>
+
+<!-- Login Screen -->
+<div id="login-screen">
+  <div class="login-card">
+    <h1>RSA Admin Dashboard</h1>
+    <p>Sign in with your Admin credentials</p>
+    <input id="l-uid" placeholder="User ID" />
+    <input id="l-pw" type="password" placeholder="Password" />
+    <button onclick="doLogin()">Sign In</button>
+    <div class="err" id="l-err"></div>
+  </div>
+</div>
+
+<!-- Dashboard -->
+<div id="dashboard">
+  <div class="topbar">
+    <h1>RSA Admin Dashboard</h1>
+    <div>
+      <span id="topbar-date" style="font-size:13px;margin-right:12px;opacity:0.8"></span>
+      <button onclick="doLogout()">Logout</button>
+    </div>
+  </div>
+  <div class="tabs">
+    <div class="tab active" onclick="showTab(0)">Live Ops</div>
+    <div class="tab" onclick="showTab(1)">Failed Drops</div>
+    <div class="tab" onclick="showTab(2)">Shift Trends</div>
+    <div class="tab" onclick="showTab(3)">Vehicles</div>
+    <div class="tab" onclick="showTab(4)">Day Analysis</div>
+    <div class="tab" onclick="showTab(5)">Stage Timings</div>
+    <div class="tab" onclick="showTab(6)">Helpers</div>
+    <div class="tab" onclick="showTab(7)">🗺 Live Map</div>
+  </div>
+
+  <!-- Tab 0: Live Ops -->
+  <div class="panel active" id="panel-0">
+    <div class="refresh-row">
+      <button class="refresh-btn" onclick="loadDashboard()">&#8635; Refresh</button>
+      <span class="as-of" id="asof-live"></span>
+    </div>
+    <div class="cards" id="live-cards"></div>
+    <div class="section-title">Live Driver Status</div>
+    <table><thead><tr><th>Driver</th><th>Stage</th><th>Vehicle</th><th>KM So Far</th><th>Shift Start</th><th>Wait / Run (mins)</th></tr></thead><tbody id="live-table"></tbody></table>
+    <div class="section-title" style="margin-top:24px">Punch-Out Misses (Yesterday)</div>
+    <table><thead><tr><th>Driver</th><th>Shift Date</th><th>Last Stage</th></tr></thead><tbody id="miss-table"></tbody></table>
+  </div>
+
+  <!-- Tab 1: Failed Drops -->
+  <div class="panel" id="panel-1">
+    <div class="section-title">Failed Drop Analysis (This Month)</div>
+    <table><thead><tr><th>Date</th><th>Total Drops</th><th>Failed</th><th>Fail %</th></tr></thead><tbody id="failed-table"></tbody></table>
+  </div>
+
+  <!-- Tab 2: Shift Trends -->
+  <div class="panel" id="panel-2">
+    <div class="section-title">Shift Trends (This Month)</div>
+    <table><thead><tr><th>Date</th><th>Avg Shift Duration (hrs)</th><th>Total OT (hrs)</th></tr></thead><tbody id="trend-table"></tbody></table>
+  </div>
+
+  <!-- Tab 3: Vehicles -->
+  <div class="panel" id="panel-3">
+    <div class="section-title">Vehicle Analysis — Today</div>
+    <table><thead><tr><th>Vehicle</th><th>KM Driven</th><th>Run Hours</th></tr></thead><tbody id="vehicle-table"></tbody></table>
+  </div>
+
+  <!-- Tab 4: Day Analysis -->
+  <div class="panel" id="panel-4">
+    <div class="section-title">Day-Level Driver Analysis (This Month)</div>
+    <table><thead><tr><th>Date</th><th>Driver</th><th>Duration (hrs)</th><th>OT (hrs)</th><th>KM</th><th>Drops</th><th>Failed</th><th>Fail%</th></tr></thead><tbody id="day-table"></tbody></table>
+  </div>
+
+  <!-- Tab 5: Stage Timings -->
+  <div class="panel" id="panel-5">
+    <div class="section-title">Stage Timings — Today</div>
+    <table><thead><tr><th>Driver</th><th>S1→S2 (min)</th><th>S2→S3 (min)</th><th>S3→S4 (min)</th></tr></thead><tbody id="timing-table"></tbody></table>
+  </div>
+
+  <!-- Tab 6: Helpers -->
+  <div class="panel" id="panel-6">
+    <div class="section-title">Helper Usage (This Month)</div>
+    <table><thead><tr><th>Date</th><th>Helper Count</th><th>Names / Companies</th></tr></thead><tbody id="helper-table"></tbody></table>
+  </div>
+
+  <!-- Tab 7: Live Map -->
+  <div class="panel" id="panel-7">
+    <div class="map-filter-bar" id="map-filter-bar">
+      <button class="map-chip all-active" onclick="selectMapDriver(null)">All Drivers</button>
+    </div>
+    <div class="map-meta">
+      <span id="map-last-update" style="font-size:12px;color:#888"></span>
+      <button class="refresh-btn" onclick="loadMapData()">&#8635; Refresh</button>
+    </div>
+    <div id="map-container"></div>
+  </div>
+</div>
+
+<script>
+  var GAS_URL  = "https://script.google.com/macros/s/AKfycbyFz0vqYmZZkuBDktzQ0G2ElvVeGBC6zxA873oSv49-oZ7ir_cwM3a10tGvPM_kiyqjYg/exec";
+  var MAPS_KEY = "AIzaSyCkwplnJDtC5yjj8vmkiaWCBz05VJLjKl8";
+  var adminPass = "";
+  var adminId   = "";
+
+  function doLogin() {
+    var uid = document.getElementById("l-uid").value.trim();
+    var pw  = document.getElementById("l-pw").value.trim();
+    if (!uid || !pw) { document.getElementById("l-err").textContent = "Enter User ID and Password."; return; }
+    document.getElementById("l-err").textContent = "";
+    var btn = document.querySelector(".login-card button");
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner"></span>Signing in\u2026';
+    fetch(GAS_URL + "?action=authenticateUser&userId=" + encodeURIComponent(uid) + "&password=" + encodeURIComponent(pw))
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!d.success) { document.getElementById("l-err").textContent = d.error || "Login failed."; return; }
+        if (!d.isAdmin) { document.getElementById("l-err").textContent = "Admin access only."; return; }
+        adminId   = uid;
+        adminPass = pw;
+        document.getElementById("login-screen").style.display = "none";
+        document.getElementById("dashboard").style.display    = "block";
+        document.getElementById("topbar-date").textContent    = new Date().toLocaleDateString("en-GB");
+        loadDashboard();
+      })
+      .catch(function() { document.getElementById("l-err").textContent = "Network error."; })
+      .finally(function() { btn.disabled = false; btn.innerHTML = "Sign In"; });
+  }
+
+  function doLogout() {
+    adminId = ""; adminPass = "";
+    document.getElementById("dashboard").style.display    = "none";
+    document.getElementById("login-screen").style.display = "flex";
+  }
+
+  function showTab(n) {
+    document.querySelectorAll(".tab").forEach(function(t, i) { t.classList.toggle("active", i === n); });
+    document.querySelectorAll(".panel").forEach(function(p, i) { p.classList.toggle("active", i === n); });
+    if (n === 7) {
+      mapFirstFitDone = false;
+      if (window.google && window.google.maps) {
+        if (!googleMap) initMap(); else loadMapData();
+      } else {
+        loadGoogleMapsScript();
+      }
+      startMapAutoRefresh();
+    } else {
+      stopMapAutoRefresh();
+    }
+  }
+
+  function loadDashboard() {
+    fetch(GAS_URL + "?action=getAdminDashboard")
+      .then(function(r) { return r.json(); })
+      .then(function(d) { renderAll(d); })
+      .catch(function(e) { console.error(e); });
+  }
+
+  function stagePill(s) {
+    var labels = ["—", "S1: Arrived", "S2: On Road", "S3: Last Drop", "S4: Done"];
+    var cls    = ["", "s1", "s2", "s3", "s4"];
+    return '<span class="stage-pill ' + (cls[s]||"") + '">' + (labels[s]||s) + '</span>';
+  }
+
+  function renderAll(d) {
+    if (!d || d.error) { console.error("Dashboard error:", d && d.error); return; }
+
+    document.getElementById("live-cards").innerHTML =
+      card("Active Drivers", d.activeDriversToday) +
+      card("On Road", d.driversOnRoad) +
+      card("Total Drops Today", d.dropsToday && d.dropsToday.total) +
+      card("Failed Drops Today", d.dropsToday && d.dropsToday.failed) +
+      card("Punch-Out Misses", d.punchOutMisses && d.punchOutMisses.length);
+
+    var liveHtml = "";
+    (d.liveOperations || []).forEach(function(op) {
+      liveHtml += "<tr><td>" + op.driverName + "</td><td>" + stagePill(op.currentStage) + "</td><td>" +
+        op.vehicle + "</td><td>" + (op.kmSoFar||0).toFixed(1) + " km</td><td>" + op.shiftStartTime +
+        "</td><td>W:" + op.facilityWaitMins + " / R:" + op.vehRunMins + "</td></tr>";
+    });
+    document.getElementById("live-table").innerHTML = liveHtml || "<tr><td colspan=6 style='text-align:center;color:#aaa'>No active drivers today</td></tr>";
+
+    var missHtml = "";
+    (d.punchOutMisses || []).forEach(function(m) {
+      missHtml += "<tr><td>" + m.driverName + "</td><td>" + m.shiftDate + "</td><td>" + stagePill(m.stage) + "</td></tr>";
+    });
+    document.getElementById("miss-table").innerHTML = missHtml || "<tr><td colspan=3 style='text-align:center;color:#aaa'>None</td></tr>";
+
+    var failHtml = "";
+    (d.failedDropAnalysis || []).forEach(function(r) {
+      failHtml += "<tr><td>" + r.date + "</td><td>" + r.total + "</td><td>" + r.failed + "</td><td>" + r.percent + "%</td></tr>";
+    });
+    document.getElementById("failed-table").innerHTML = failHtml || "<tr><td colspan=4 style='text-align:center;color:#aaa'>No data</td></tr>";
+
+    var trendHtml = "";
+    (d.shiftTrend || []).forEach(function(r) {
+      trendHtml += "<tr><td>" + r.date + "</td><td>" + r.avgShiftDuration + " hrs</td><td>" + r.totalOT + " hrs</td></tr>";
+    });
+    document.getElementById("trend-table").innerHTML = trendHtml || "<tr><td colspan=3 style='text-align:center;color:#aaa'>No data</td></tr>";
+
+    var todayKey = Object.keys(d.vehicleAnalysis || {}).sort().pop();
+    var vehHtml  = "";
+    ((d.vehicleAnalysis || {})[todayKey] || []).forEach(function(v) {
+      vehHtml += "<tr><td>" + v.vehicle + "</td><td>" + v.km + " km</td><td>" + v.runHours + " hrs</td></tr>";
+    });
+    document.getElementById("vehicle-table").innerHTML = vehHtml || "<tr><td colspan=3 style='text-align:center;color:#aaa'>No data for today</td></tr>";
+
+    var dayHtml = "";
+    (d.dayAnalysis || []).forEach(function(r) {
+      dayHtml += "<tr><td>" + r.date + "</td><td>" + r.driverName + "</td><td>" + r.shiftDuration + "</td><td>" +
+        r.overtime + "</td><td>" + r.km + "</td><td>" + r.totalDrops + "</td><td>" + r.failedDrops + "</td><td>" + r.failPercent + "%</td></tr>";
+    });
+    document.getElementById("day-table").innerHTML = dayHtml || "<tr><td colspan=8 style='text-align:center;color:#aaa'>No data</td></tr>";
+
+    var timingHtml = "";
+    (d.stageTimings || []).forEach(function(r) {
+      timingHtml += "<tr><td>" + r.driverName + "</td><td>" + (r.s1ToS2Mins !== null ? r.s1ToS2Mins : "—") +
+        "</td><td>" + (r.s2ToS3Mins !== null ? r.s2ToS3Mins : "—") +
+        "</td><td>" + (r.s3ToS4Mins !== null ? r.s3ToS4Mins : "—") + "</td></tr>";
+    });
+    document.getElementById("timing-table").innerHTML = timingHtml || "<tr><td colspan=4 style='text-align:center;color:#aaa'>No data</td></tr>";
+
+    var helperHtml = "";
+    (d.helperUsage || []).forEach(function(r) {
+      var names = (r.helpers || []).map(function(h) { return h.helperName + (h.company ? " (" + h.company + ")" : ""); }).join(", ");
+      helperHtml += "<tr><td>" + r.date + "</td><td>" + r.count + "</td><td>" + names + "</td></tr>";
+    });
+    document.getElementById("helper-table").innerHTML = helperHtml || "<tr><td colspan=3 style='text-align:center;color:#aaa'>No data</td></tr>";
+  }
+
+  function card(label, value) {
+    return '<div class="card"><div class="val">' + (value !== undefined && value !== null ? value : "—") + '</div><div class="lbl">' + label + '</div></div>';
+  }
+
+  // =============================================================
+  // Live Map
+  // =============================================================
+  var googleMap      = null;
+  var mapMarkers     = {};
+  var mapPolylines   = {};
+  var mapDriversData = [];
+  var mapRouteData   = {};
+  var mapSelectedId  = null;
+  var mapColorMap    = {};
+  var mapInterval    = null;
+  var mapApiLoading  = false;
+  var mapFirstFitDone = false;
+  var MAP_COLORS = ["#E53935","#7B1FA2","#00897B","#F57C00","#0288D1","#558B2F","#AD1457","#795548"];
+  var FACILITY_LAT = 24.903892;
+  var FACILITY_LNG = 55.114065;
+
+  function getMapColor(driverId) {
+    if (!mapColorMap[driverId]) {
+      var idx = Object.keys(mapColorMap).length;
+      mapColorMap[driverId] = MAP_COLORS[idx % MAP_COLORS.length];
+    }
+    return mapColorMap[driverId];
+  }
+
+  function loadGoogleMapsScript() {
+    if (mapApiLoading) return;
+    mapApiLoading = true;
+    var s = document.createElement("script");
+    s.src = "https://maps.googleapis.com/maps/api/js?key=" + MAPS_KEY + "&callback=initMap";
+    s.async = true; s.defer = true;
+    document.head.appendChild(s);
+  }
+
+  function initMap() {
+    mapApiLoading = false;
+    googleMap = new google.maps.Map(document.getElementById("map-container"), {
+      zoom: 11,
+      center: { lat: FACILITY_LAT, lng: FACILITY_LNG },
+      mapTypeId: "roadmap",
+    });
+    new google.maps.Marker({
+      position: { lat: FACILITY_LAT, lng: FACILITY_LNG },
+      map: googleMap,
+      title: "RSA Facility",
+      icon: "https://maps.google.com/mapfiles/ms/icons/blue-dot.png",
+      zIndex: 100,
+    });
+    loadMapData();
+  }
+
+  function loadMapData() {
+    var today = new Date().toISOString().slice(0, 10);
+    fetch(GAS_URL + "?action=getActiveDriversLive")
+      .then(function(r) { return r.json(); })
+      .then(function(result) {
+        if (!result.success) return;
+        mapDriversData = result.drivers || [];
+        var promises = mapDriversData.map(function(d) {
+          return fetch(GAS_URL + "?action=getDriverRoute&driverId=" + encodeURIComponent(d.driverId) + "&date=" + encodeURIComponent(today))
+            .then(function(r) { return r.json(); })
+            .then(function(r) { return { driverId: d.driverId, points: r.points || [] }; })
+            .catch(function() { return { driverId: d.driverId, points: [] }; });
+        });
+        Promise.all(promises).then(function(routes) {
+          routes.forEach(function(r) { mapRouteData[r.driverId] = r.points; });
+          renderMap();
+          if (!mapFirstFitDone) { fitMapToBounds(); mapFirstFitDone = true; }
+          document.getElementById("map-last-update").textContent = "Updated " + new Date().toLocaleTimeString("en-GB");
+        });
+      })
+      .catch(function(e) { console.error("Map error:", e); });
+  }
+
+  function renderMap() {
+    if (!googleMap) return;
+    Object.values(mapMarkers).forEach(function(m) { m.setMap(null); });
+    Object.values(mapPolylines).forEach(function(p) { p.setMap(null); });
+    mapMarkers = {}; mapPolylines = {};
+    var display = mapSelectedId
+      ? mapDriversData.filter(function(d) { return d.driverId === mapSelectedId; })
+      : mapDriversData;
+    var bounds = new google.maps.LatLngBounds();
+    bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });
+    display.forEach(function(d) {
+      var color = getMapColor(d.driverId);
+      var pts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });
+      if (pts.length >= 2) {
+        mapPolylines[d.driverId] = new google.maps.Polyline({
+          path: pts, geodesic: true,
+          strokeColor: color, strokeOpacity: 1.0, strokeWeight: 3, map: googleMap,
+        });
+        pts.forEach(function(p) { bounds.extend(p); });
+      }
+      if (d.lat && d.lng) {
+        var iw = new google.maps.InfoWindow({
+          content: "<div style='padding:6px;min-width:180px'><strong>" + d.driverName + "</strong><br>" +
+            (d.kmTotal||0).toFixed(1) + " km" + (d.vehicle ? " &middot; " + d.vehicle : "") + "<br>" +
+            "<span style='color:#888;font-size:11px'>" + d.timestamp + "</span></div>",
+        });
+        var marker = new google.maps.Marker({
+          position: { lat: d.lat, lng: d.lng },
+          map: googleMap, title: d.driverName,
+          icon: { path: google.maps.SymbolPath.CIRCLE, scale: 10,
+            fillColor: color, fillOpacity: 1, strokeColor: "#fff", strokeWeight: 2 },
+          zIndex: 200,
+        });
+        (function(mk, iwin) { mk.addListener("click", function() { iwin.open(googleMap, mk); }); })(marker, iw);
+        mapMarkers[d.driverId] = marker;
+        bounds.extend({ lat: d.lat, lng: d.lng });
+      }
+    });
+    renderMapFilterBar();
+  }
+
+  function fitMapToBounds() {
+    if (!googleMap) return;
+    var display = mapSelectedId
+      ? mapDriversData.filter(function(d) { return d.driverId === mapSelectedId; })
+      : mapDriversData;
+    var bounds = new google.maps.LatLngBounds();
+    bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });
+    display.forEach(function(d) {
+      var pts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });
+      pts.forEach(function(p) { bounds.extend(p); });
+      if (d.lat && d.lng) bounds.extend({ lat: d.lat, lng: d.lng });
+    });
+    if (!bounds.isEmpty()) googleMap.fitBounds(bounds, { top: 60, right: 40, bottom: 40, left: 40 });
+  }
+
+  function renderMapFilterBar() {
+    var html = '<button class="map-chip' + (!mapSelectedId ? " all-active" : "") + '" data-idx="-1">All Drivers</button> ';
+    for (var i = 0; i < mapDriversData.length; i++) {
+      var d = mapDriversData[i];
+      var color = getMapColor(d.driverId);
+      var active = mapSelectedId === d.driverId;
+      html += '<button class="map-chip" data-idx="' + i + '" style="border-color:' + color +
+        ';background:' + (active ? color : "#fff") + ';color:' + (active ? "#fff" : "#555") + '">' +
+        '<span class="map-dot" style="background:' + color + '"></span>' +
+        d.driverName + (d.vehicle ? " &middot; " + d.vehicle : "") + "</button> ";
+    }
+    var bar = document.getElementById("map-filter-bar");
+    bar.innerHTML = html;
+    bar.onclick = function(e) {
+      var btn = e.target.closest("[data-idx]");
+      if (!btn) return;
+      var idx = parseInt(btn.getAttribute("data-idx"));
+      if (idx < 0) { mapSelectedId = null; }
+      else { var dr = mapDriversData[idx]; mapSelectedId = dr ? dr.driverId : null; }
+      renderMap(); fitMapToBounds();
+    };
+  }
+
+  function selectMapDriver(id) { mapSelectedId = id; renderMap(); fitMapToBounds(); }
+
+  function startMapAutoRefresh() {
+    if (mapInterval) clearInterval(mapInterval);
+    mapInterval = setInterval(function() { if (googleMap) loadMapData(); }, 15000);
+  }
+  function stopMapAutoRefresh() {
+    if (mapInterval) { clearInterval(mapInterval); mapInterval = null; }
+  }
+
+  document.getElementById("l-pw").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });
+  document.getElementById("l-uid").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });
+
+  // Register service worker for PWA
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', function() {
+      navigator.serviceWorker.register('./sw.js').catch(function() {});
+    });
+  }
+</script>
+</body>
+</html>
