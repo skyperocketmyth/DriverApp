@@ -13,6 +13,7 @@
 //   gps/routes/{shiftRowId}/{key}  ← ordered route points per shift (polyline)
 // =============================================================================
 import database from '@react-native-firebase/database';
+import auth from '@react-native-firebase/auth';
 
 // Enable disk persistence — queued writes survive app kills and replay on restart.
 // Must be called before any database reference is used.
@@ -20,6 +21,12 @@ import database from '@react-native-firebase/database';
 try {
   database().setPersistenceEnabled(true);
 } catch (_) {}
+
+// Sign in anonymously so GPS writes satisfy Firebase "auth != null" security rules.
+// The anonymous session persists on-device across app restarts (no sign-in delay on
+// subsequent launches). Fire-and-forget — the DB write queue buffers locally until
+// auth is established, so no GPS points are lost during the brief sign-in.
+auth().signInAnonymously().catch(() => {});
 
 const RTDB_LIVE   = 'gps/live';
 const RTDB_ROUTES = 'gps/routes';
