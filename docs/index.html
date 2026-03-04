@@ -153,6 +153,8 @@
   </div>
 </div>
 
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
 <script>
   var GAS_URL  = "https://script.google.com/macros/s/AKfycbyFz0vqYmZZkuBDktzQ0G2ElvVeGBC6zxA873oSv49-oZ7ir_cwM3a10tGvPM_kiyqjYg/exec";
   var MAPS_KEY = "AIzaSyCkwplnJDtC5yjj8vmkiaWCBz05VJLjKl8";
@@ -212,13 +214,12 @@
     if (n === 7) {
       mapFirstFitDone = false;
       if (window.google && window.google.maps) {
-        if (!googleMap) initMap(); else loadMapData();
+        if (!googleMap) initMap(); else startMapSubscription();
       } else {
         loadGoogleMapsScript();
       }
-      startMapAutoRefresh();
     } else {
-      stopMapAutoRefresh();
+      stopMapSubscription();
     }
   }
 
@@ -306,17 +307,33 @@
   }
 
   // =============================================================
-  // Live Map
+  // Firebase Real-Time Live Map
   // =============================================================
-  var googleMap      = null;
-  var mapMarkers     = {};
-  var mapPolylines   = {};
-  var mapDriversData = [];
-  var mapRouteData   = {};
-  var mapSelectedId  = null;
-  var mapColorMap    = {};
-  var mapInterval    = null;
-  var mapApiLoading  = false;
+  var FIREBASE_CONFIG = {
+    apiKey:            "AIzaSyDHm_ZE5GjDoMep9J-ayKsvMOijJxliqlk",
+    authDomain:        "warehouse-stock-take.firebaseapp.com",
+    databaseURL:       "https://warehouse-stock-take-default-rtdb.firebaseio.com",
+    projectId:         "warehouse-stock-take",
+    storageBucket:     "warehouse-stock-take.firebasestorage.app",
+    messagingSenderId: "740578243967",
+    appId:             "1:740578243967:web:b092549d9a6f71450fd64a"
+  };
+  var _fbInited = false;
+  function getDb() {
+    if (!_fbInited) { firebase.initializeApp(FIREBASE_CONFIG); _fbInited = true; }
+    return firebase.database();
+  }
+
+  var googleMap       = null;
+  var mapMarkers      = {};
+  var mapPolylines    = {};
+  var mapDriversData  = [];
+  var mapRouteByShift = {};  // shiftRowId → points[] (persistent cache)
+  var mapRouteData    = {};  // driverId   → points[] (used by renderMap)
+  var mapSelectedId   = null;
+  var mapColorMap     = {};
+  var mapLiveRef      = null;
+  var mapApiLoading   = false;
   var mapFirstFitDone = false;
   var MAP_COLORS = ["#E53935","#7B1FA2","#00897B","#F57C00","#0288D1","#558B2F","#AD1457","#795548"];
   var FACILITY_LAT = 24.903892;
@@ -332,7 +349,7 @@
       var dLng = (points[i].lng - prev.lng) * Math.PI / 180;
       var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(prev.lat*Math.PI/180)*Math.cos(points[i].lat*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
       var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      if (dist < 2000) filtered.push(points[i]);
+      if (dist < 300) filtered.push(points[i]);
     }
     return filtered;
   }
@@ -368,30 +385,61 @@
       icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 52" width="48" height="52"><text x="50%" y="46" dominant-baseline="middle" text-anchor="middle" font-size="40">\uD83C\uDFE0</text></svg>'), scaledSize: new google.maps.Size(48, 52), anchor: new google.maps.Point(24, 52) },
       zIndex: 100,
     });
-    loadMapData();
+    startMapSubscription();
   }
 
-  function loadMapData() {
+  function startMapSubscription() {
+    stopMapSubscription();
     var today = new Date().toISOString().slice(0, 10);
-    fetch(GAS_URL + "?action=getActiveDriversLive")
-      .then(function(r) { return r.json(); })
-      .then(function(result) {
-        if (!result.success) return;
-        mapDriversData = result.drivers || [];
-        var promises = mapDriversData.map(function(d) {
-          return fetch(GAS_URL + "?action=getDriverRoute&driverId=" + encodeURIComponent(d.driverId) + "&date=" + encodeURIComponent(today) + (d.shiftRowId ? "&shiftRowId=" + encodeURIComponent(d.shiftRowId) : ""))
-            .then(function(r) { return r.json(); })
-            .then(function(r) { return { driverId: d.driverId, points: r.points || [] }; })
-            .catch(function() { return { driverId: d.driverId, points: [] }; });
+    var db = getDb();
+    mapLiveRef = db.ref('gps/live');
+    mapLiveRef.on('value', function(snapshot) {
+      var val = snapshot.val() || {};
+      var drivers = Object.values(val).filter(function(d) { return d.date === today; });
+      mapDriversData = drivers;
+
+      // Fetch routes for any shiftRowId not yet in cache
+      var pending = [];
+      drivers.forEach(function(d) {
+        if (d.shiftRowId && mapRouteByShift[d.shiftRowId] === undefined) {
+          mapRouteByShift[d.shiftRowId] = null; // mark as in-flight
+          var rowId = d.shiftRowId;
+          pending.push(
+            db.ref('gps/routes/' + rowId).orderByChild('ts').once('value')
+              .then(function(snap) {
+                var rval = snap.val();
+                mapRouteByShift[rowId] = rval
+                  ? Object.values(rval)
+                      .sort(function(a, b) { return a.ts > b.ts ? 1 : -1; })
+                      .map(function(p) { return { lat: p.lat, lng: p.lng }; })
+                  : [];
+              })
+              .catch(function() { mapRouteByShift[rowId] = []; })
+          );
+        }
+      });
+
+      Promise.all(pending).then(function() {
+        drivers.forEach(function(d) {
+          mapRouteData[d.driverId] = (d.shiftRowId && mapRouteByShift[d.shiftRowId]) || [];
         });
-        Promise.all(promises).then(function(routes) {
-          routes.forEach(function(r) { mapRouteData[r.driverId] = r.points; });
-          renderMap();
-          if (!mapFirstFitDone) { fitMapToBounds(); mapFirstFitDone = true; }
-          document.getElementById("map-last-update").textContent = "Updated " + new Date().toLocaleTimeString("en-GB");
-        });
-      })
-      .catch(function(e) { console.error("Map error:", e); });
+        renderMap();
+        if (!mapFirstFitDone && drivers.length > 0) { fitMapToBounds(); mapFirstFitDone = true; }
+        document.getElementById("map-last-update").textContent =
+          "Live \u2022 " + new Date().toLocaleTimeString("en-GB");
+      });
+    });
+  }
+
+  function stopMapSubscription() {
+    if (mapLiveRef) { mapLiveRef.off(); mapLiveRef = null; }
+  }
+
+  // Manual refresh — clears route cache so routes are re-fetched on next Firebase event
+  function loadMapData() {
+    mapRouteByShift = {};
+    mapRouteData    = {};
+    startMapSubscription();
   }
 
   function renderMap() {
@@ -405,9 +453,9 @@
     var bounds = new google.maps.LatLngBounds();
     bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });
     display.forEach(function(d) {
-      var color = getMapColor(d.driverId);
+      var color  = getMapColor(d.driverId);
       var rawPts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });
-      var pts = filterRouteOutliers(rawPts);
+      var pts    = filterRouteOutliers(rawPts);
       if (pts.length >= 2) {
         mapPolylines[d.driverId] = new google.maps.Polyline({
           path: pts, geodesic: true,
@@ -416,11 +464,12 @@
         pts.forEach(function(p) { bounds.extend(p); });
       }
       if (d.lat && d.lng) {
+        var km = d.km !== undefined ? d.km : (d.kmTotal || 0);
         var iwContent = "<div style='padding:8px;min-width:190px;font-family:sans-serif'>" +
           "<strong style='font-size:14px'>" + d.driverName + "</strong><br>" +
-          "\uD83D\uDE9A " + (d.vehicle || "—") + "<br>" +
-          "\uD83D\uDCCD " + (d.kmTotal||0).toFixed(1) + " km<br>" +
-          "\uD83D\uDD50 <span style='color:#888;font-size:11px'>" + d.timestamp + "</span></div>";
+          "\uD83D\uDE9A " + (d.vehicle || "\u2014") + "<br>" +
+          "\uD83D\uDCCD " + (typeof km === 'number' ? km.toFixed(1) : km) + " km<br>" +
+          "\uD83D\uDD50 <span style='color:#888;font-size:11px'>" + (d.ts || d.timestamp || "") + "</span></div>";
         var iw = new google.maps.InfoWindow({ content: iwContent });
         var truckSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40"><circle cx="20" cy="20" r="19" fill="' + color + '" stroke="#fff" stroke-width="2"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="20">\uD83D\uDE9A</text></svg>';
         var marker = new google.maps.Marker({
@@ -456,12 +505,12 @@
     var html = '<button class="map-chip' + (!mapSelectedId ? " all-active" : "") + '" data-idx="-1">All Drivers</button> ';
     for (var i = 0; i < mapDriversData.length; i++) {
       var d = mapDriversData[i];
-      var color = getMapColor(d.driverId);
+      var color  = getMapColor(d.driverId);
       var active = mapSelectedId === d.driverId;
       html += '<button class="map-chip" data-idx="' + i + '" style="border-color:' + color +
         ';background:' + (active ? color : "#fff") + ';color:' + (active ? "#fff" : "#555") + '">' +
         '<span class="map-dot" style="background:' + color + '"></span>' +
-        d.driverName + (d.vehicle ? " &middot; " + d.vehicle : "") + "</button> ";
+        d.driverName + "</button> ";
     }
     var bar = document.getElementById("map-filter-bar");
     bar.innerHTML = html;
@@ -476,14 +525,6 @@
   }
 
   function selectMapDriver(id) { mapSelectedId = id; renderMap(); fitMapToBounds(); }
-
-  function startMapAutoRefresh() {
-    if (mapInterval) clearInterval(mapInterval);
-    mapInterval = setInterval(function() { if (googleMap) loadMapData(); }, 15000);
-  }
-  function stopMapAutoRefresh() {
-    if (mapInterval) { clearInterval(mapInterval); mapInterval = null; }
-  }
 
   document.getElementById("l-pw").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });
   document.getElementById("l-uid").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });
