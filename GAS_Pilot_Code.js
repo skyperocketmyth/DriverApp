@@ -100,10 +100,6 @@ function doGet(e) {
       result = getAdminDashboard(param.date);
     } else if (action === 'getLiveOperations') {
       result = getLiveOperations();
-    } else if (action === 'getActiveDriversLive') {
-      result = getActiveDriversLive();
-    } else if (action === 'getDriverRoute') {
-      result = getDriverRoute(param.driverId, param.date, param.shiftRowId);
     } else {
       result = { error: 'Unknown action: ' + action };
     }
@@ -1369,6 +1365,8 @@ function getAdminHtml_() {
 '  </div>\n' +
 '</div>\n' +
 '\n' +
+'<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>\n' +
+'<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>\n' +
 '<script>\n' +
 '  var GAS_URL  = "' + gasUrl + '";\n' +
 '  var MAPS_KEY = "' + GOOGLE_MAPS_API_KEY + '";\n' +
@@ -1432,9 +1430,8 @@ function getAdminHtml_() {
 '      } else {\n' +
 '        loadGoogleMapsScript();\n' +
 '      }\n' +
-'      startMapAutoRefresh();\n' +
 '    } else {\n' +
-'      stopMapAutoRefresh();\n' +
+'      stopMapSubscription();\n' +
 '    }\n' +
 '  }\n' +
 '\n' +
@@ -1532,29 +1529,40 @@ function getAdminHtml_() {
 '  }\n' +
 '\n' +
 '  // =============================================================\n' +
-'  // Live Map\n' +
+'  // Live Map — Firebase Realtime DB\n' +
 '  // =============================================================\n' +
-'  var googleMap      = null;\n' +
-'  var mapMarkers     = {};\n' +
-'  var mapPolylines   = {};\n' +
-'  var mapDriversData = [];\n' +
-'  var mapRouteData   = {};\n' +
-'  var mapSelectedId  = null;\n' +
-'  var mapColorMap    = {};\n' +
-'  var mapInterval    = null;\n' +
-'  var mapApiLoading  = false;\n' +
-'  var mapFirstFitDone = false;\n' +
+'  var FIREBASE_CONFIG = {\n' +
+'    apiKey:            "AIzaSyDHm_ZE5GjDoMep9J-ayKsvMOijJxliqlk",\n' +
+'    authDomain:        "warehouse-stock-take.firebaseapp.com",\n' +
+'    databaseURL:       "https://warehouse-stock-take-default-rtdb.firebaseio.com",\n' +
+'    projectId:         "warehouse-stock-take",\n' +
+'    storageBucket:     "warehouse-stock-take.firebasestorage.app",\n' +
+'    messagingSenderId: "740578243967",\n' +
+'    appId:             "1:740578243967:web:b092549d9a6f71450fd64a"\n' +
+'  };\n' +
+'  var _fbInited = false;\n' +
+'  function getDb() {\n' +
+'    if (!_fbInited) { firebase.initializeApp(FIREBASE_CONFIG); _fbInited = true; }\n' +
+'    return firebase.database();\n' +
+'  }\n' +
+'\n' +
+'  var googleMap        = null;\n' +
+'  var mapMarkers       = {};\n' +
+'  var mapPolylines     = {};\n' +
+'  var mapDriversData   = [];\n' +
+'  var mapRouteByShift  = {};\n' +
+'  var mapSnappedByShift= {};\n' +
+'  var mapRouteListeners= {};\n' +
+'  var mapShiftToDriver = {};\n' +
+'  var mapRouteData     = {};\n' +
+'  var mapSelectedId    = null;\n' +
+'  var mapColorMap      = {};\n' +
+'  var mapLiveRef       = null;\n' +
+'  var mapApiLoading    = false;\n' +
+'  var mapFirstFitDone  = false;\n' +
 '  var MAP_COLORS = ["#E53935","#7B1FA2","#00897B","#F57C00","#0288D1","#558B2F","#AD1457","#795548"];\n' +
 '  var FACILITY_LAT = 24.903892;\n' +
 '  var FACILITY_LNG = 55.114065;\n' +
-'\n' +
-'  function getMapColor(driverId) {\n' +
-'    if (!mapColorMap[driverId]) {\n' +
-'      var idx = Object.keys(mapColorMap).length;\n' +
-'      mapColorMap[driverId] = MAP_COLORS[idx % MAP_COLORS.length];\n' +
-'    }\n' +
-'    return mapColorMap[driverId];\n' +
-'  }\n' +
 '\n' +
 '  function filterRouteOutliers(points) {\n' +
 '    if (points.length < 2) return points;\n' +
@@ -1566,9 +1574,71 @@ function getAdminHtml_() {
 '      var dLng = (points[i].lng - prev.lng) * Math.PI / 180;\n' +
 '      var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(prev.lat*Math.PI/180)*Math.cos(points[i].lat*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);\n' +
 '      var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));\n' +
-'      if (dist < 2000) filtered.push(points[i]);\n' +
+'      if (dist < 5000) filtered.push(points[i]);\n' +
 '    }\n' +
 '    return filtered;\n' +
+'  }\n' +
+'\n' +
+'  function perpendicularDist(pt, s, e) {\n' +
+'    var dx = e.lat - s.lat, dy = e.lng - s.lng;\n' +
+'    if (dx === 0 && dy === 0) {\n' +
+'      var dlat = (pt.lat - s.lat) * 111320;\n' +
+'      var dlng = (pt.lng - s.lng) * 111320 * Math.cos(s.lat * Math.PI / 180);\n' +
+'      return Math.sqrt(dlat*dlat + dlng*dlng);\n' +
+'    }\n' +
+'    var t = Math.max(0, Math.min(1, ((pt.lat-s.lat)*dx + (pt.lng-s.lng)*dy) / (dx*dx + dy*dy)));\n' +
+'    var px = (s.lat + t*dx - pt.lat) * 111320;\n' +
+'    var py = (s.lng + t*dy - pt.lng) * 111320 * Math.cos(pt.lat * Math.PI / 180);\n' +
+'    return Math.sqrt(px*px + py*py);\n' +
+'  }\n' +
+'\n' +
+'  function rdpSimplify(pts, eps) {\n' +
+'    if (pts.length < 3) return pts;\n' +
+'    var maxD = 0, idx = 0;\n' +
+'    var s = pts[0], e = pts[pts.length - 1];\n' +
+'    for (var i = 1; i < pts.length - 1; i++) {\n' +
+'      var d = perpendicularDist(pts[i], s, e);\n' +
+'      if (d > maxD) { maxD = d; idx = i; }\n' +
+'    }\n' +
+'    if (maxD > eps) {\n' +
+'      var l = rdpSimplify(pts.slice(0, idx + 1), eps);\n' +
+'      var r = rdpSimplify(pts.slice(idx), eps);\n' +
+'      return l.slice(0, -1).concat(r);\n' +
+'    }\n' +
+'    return [s, e];\n' +
+'  }\n' +
+'\n' +
+'  async function snapToRoads(rawPts) {\n' +
+'    if (!rawPts || rawPts.length < 2) return rawPts || [];\n' +
+'    var snapped = [];\n' +
+'    for (var i = 0; i < rawPts.length; i += 90) {\n' +
+'      var chunk = rawPts.slice(i, Math.min(i + 90, rawPts.length));\n' +
+'      var path  = chunk.map(function(p) { return p.lat + \',\' + p.lng; }).join(\'|\');\n' +
+'      var url   = \'https://roads.googleapis.com/v1/snapToRoads?interpolate=true&key=\'\n' +
+'                  + MAPS_KEY + \'&path=\' + encodeURIComponent(path);\n' +
+'      try {\n' +
+'        var resp = await fetch(url);\n' +
+'        if (resp.ok) {\n' +
+'          var data = await resp.json();\n' +
+'          if (data.snappedPoints && data.snappedPoints.length) {\n' +
+'            data.snappedPoints.forEach(function(sp) {\n' +
+'              snapped.push({ lat: sp.location.latitude, lng: sp.location.longitude });\n' +
+'            });\n' +
+'            continue;\n' +
+'          }\n' +
+'        }\n' +
+'      } catch(_) {}\n' +
+'      chunk.forEach(function(p) { snapped.push(p); });\n' +
+'    }\n' +
+'    return snapped.length >= 2 ? snapped : rawPts;\n' +
+'  }\n' +
+'\n' +
+'  function getMapColor(driverId) {\n' +
+'    if (!mapColorMap[driverId]) {\n' +
+'      var idx = Object.keys(mapColorMap).length;\n' +
+'      mapColorMap[driverId] = MAP_COLORS[idx % MAP_COLORS.length];\n' +
+'    }\n' +
+'    return mapColorMap[driverId];\n' +
 '  }\n' +
 '\n' +
 '  function loadGoogleMapsScript() {\n' +
@@ -1594,30 +1664,87 @@ function getAdminHtml_() {
 '      icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(\'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 52" width="48" height="52"><text x="50%" y="46" dominant-baseline="middle" text-anchor="middle" font-size="40">\\uD83C\\uDFE0</text></svg>\'), scaledSize: new google.maps.Size(48, 52), anchor: new google.maps.Point(24, 52) },\n' +
 '      zIndex: 100,\n' +
 '    });\n' +
-'    loadMapData();\n' +
+'    startMapSubscription();\n' +
+'  }\n' +
+'\n' +
+'  function startMapSubscription() {\n' +
+'    stopMapSubscription();\n' +
+'    var today = new Date().toISOString().slice(0, 10);\n' +
+'    var db = getDb();\n' +
+'    mapLiveRef = db.ref(\'gps/live\');\n' +
+'    mapLiveRef.on(\'value\', function(snapshot) {\n' +
+'      var val = snapshot.val() || {};\n' +
+'      var drivers = Object.values(val).filter(function(d) { return d.date === today; });\n' +
+'      mapDriversData = drivers;\n' +
+'      drivers.forEach(function(d) {\n' +
+'        if (d.shiftRowId) mapShiftToDriver[d.shiftRowId] = d.driverId;\n' +
+'      });\n' +
+'      drivers.forEach(function(d) {\n' +
+'        if (!d.shiftRowId || mapRouteListeners[d.shiftRowId] !== undefined) return;\n' +
+'        mapRouteByShift[d.shiftRowId]   = [];\n' +
+'        mapSnappedByShift[d.shiftRowId] = null;\n' +
+'        mapRouteListeners[d.shiftRowId] = null;\n' +
+'        (function(rowId, driverId) {\n' +
+'          var seenKeys = {};\n' +
+'          db.ref(\'gps/routes/\' + rowId).orderByChild(\'ts\').once(\'value\', function(snap) {\n' +
+'            var rval = snap.val() || {};\n' +
+'            Object.keys(rval).forEach(function(k) { seenKeys[k] = true; });\n' +
+'            var pts = Object.values(rval)\n' +
+'              .sort(function(a, b) { return a.ts > b.ts ? 1 : -1; })\n' +
+'              .map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
+'            pts = filterRouteOutliers(pts);\n' +
+'            mapRouteByShift[rowId] = pts;\n' +
+'            mapRouteData[driverId] = pts;\n' +
+'            renderMap();\n' +
+'            if (!mapFirstFitDone && mapDriversData.length > 0) { fitMapToBounds(); mapFirstFitDone = true; }\n' +
+'            snapToRoads(rdpSimplify(pts, 8)).then(function(snapped) {\n' +
+'              mapSnappedByShift[rowId] = snapped;\n' +
+'              mapRouteData[driverId]   = snapped;\n' +
+'              renderMap();\n' +
+'            });\n' +
+'            var routeRef = db.ref(\'gps/routes/\' + rowId).orderByChild(\'ts\');\n' +
+'            mapRouteListeners[rowId] = routeRef;\n' +
+'            routeRef.on(\'child_added\', function(childSnap) {\n' +
+'              if (seenKeys[childSnap.key]) return;\n' +
+'              seenKeys[childSnap.key] = true;\n' +
+'              var p = childSnap.val();\n' +
+'              if (!p || !p.lat || !p.lng) return;\n' +
+'              var newPt = { lat: p.lat, lng: p.lng };\n' +
+'              mapRouteByShift[rowId].push(newPt);\n' +
+'              if (mapSnappedByShift[rowId]) mapSnappedByShift[rowId].push(newPt);\n' +
+'              mapRouteData[driverId] = mapSnappedByShift[rowId] || mapRouteByShift[rowId];\n' +
+'              renderMap();\n' +
+'            });\n' +
+'          });\n' +
+'        })(d.shiftRowId, d.driverId);\n' +
+'      });\n' +
+'      drivers.forEach(function(d) {\n' +
+'        if (d.shiftRowId && mapSnappedByShift[d.shiftRowId]) {\n' +
+'          mapRouteData[d.driverId] = mapSnappedByShift[d.shiftRowId];\n' +
+'        } else if (d.shiftRowId && mapRouteByShift[d.shiftRowId]) {\n' +
+'          mapRouteData[d.driverId] = mapRouteByShift[d.shiftRowId];\n' +
+'        }\n' +
+'      });\n' +
+'      renderMap();\n' +
+'      document.getElementById("map-last-update").textContent =\n' +
+'        "Live \\u2022 " + new Date().toLocaleTimeString("en-GB");\n' +
+'    });\n' +
+'  }\n' +
+'\n' +
+'  function stopMapSubscription() {\n' +
+'    if (mapLiveRef) { mapLiveRef.off(); mapLiveRef = null; }\n' +
+'    Object.values(mapRouteListeners).forEach(function(ref) { if (ref) ref.off(); });\n' +
+'    mapRouteListeners = {};\n' +
 '  }\n' +
 '\n' +
 '  function loadMapData() {\n' +
-'    var today = new Date().toISOString().slice(0, 10);\n' +
-'    fetch(GAS_URL + "?action=getActiveDriversLive")\n' +
-'      .then(function(r) { return r.json(); })\n' +
-'      .then(function(result) {\n' +
-'        if (!result.success) return;\n' +
-'        mapDriversData = result.drivers || [];\n' +
-'        var promises = mapDriversData.map(function(d) {\n' +
-'          return fetch(GAS_URL + "?action=getDriverRoute&driverId=" + encodeURIComponent(d.driverId) + "&date=" + encodeURIComponent(today) + (d.shiftRowId ? "&shiftRowId=" + encodeURIComponent(d.shiftRowId) : ""))\n' +
-'            .then(function(r) { return r.json(); })\n' +
-'            .then(function(r) { return { driverId: d.driverId, points: r.points || [] }; })\n' +
-'            .catch(function() { return { driverId: d.driverId, points: [] }; });\n' +
-'        });\n' +
-'        Promise.all(promises).then(function(routes) {\n' +
-'          routes.forEach(function(r) { mapRouteData[r.driverId] = r.points; });\n' +
-'          renderMap();\n' +
-'          if (!mapFirstFitDone) { fitMapToBounds(); mapFirstFitDone = true; }\n' +
-'          document.getElementById("map-last-update").textContent = "Updated " + new Date().toLocaleTimeString("en-GB");\n' +
-'        });\n' +
-'      })\n' +
-'      .catch(function(e) { console.error("Map error:", e); });\n' +
+'    stopMapSubscription();\n' +
+'    mapRouteByShift   = {};\n' +
+'    mapSnappedByShift = {};\n' +
+'    mapShiftToDriver  = {};\n' +
+'    mapRouteData      = {};\n' +
+'    mapFirstFitDone   = false;\n' +
+'    startMapSubscription();\n' +
 '  }\n' +
 '\n' +
 '  function renderMap() {\n' +
@@ -1632,22 +1759,21 @@ function getAdminHtml_() {
 '    bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });\n' +
 '    display.forEach(function(d) {\n' +
 '      var color = getMapColor(d.driverId);\n' +
-'      var rawPts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
-'      var pts = filterRouteOutliers(rawPts);\n' +
+'      var pts   = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
 '      if (pts.length >= 2) {\n' +
 '        mapPolylines[d.driverId] = new google.maps.Polyline({\n' +
 '          path: pts, geodesic: true,\n' +
-'          strokeColor: color, strokeOpacity: 1.0, strokeWeight: 3, map: googleMap,\n' +
+'          strokeColor: color, strokeOpacity: 1.0, strokeWeight: 4, map: googleMap,\n' +
 '        });\n' +
 '        pts.forEach(function(p) { bounds.extend(p); });\n' +
 '      }\n' +
 '      if (d.lat && d.lng) {\n' +
-'        var stageNames = ["","At Facility","On Road","Last Drop Done","Shift Complete"];\n' +
+'        var km = d.km !== undefined ? d.km : 0;\n' +
 '        var iwContent = "<div style=\\"padding:8px;min-width:190px;font-family:sans-serif\\">" +\n' +
 '          "<strong style=\\"font-size:14px\\">" + d.driverName + "</strong><br>" +\n' +
 '          "\\uD83D\\uDE9A " + (d.vehicle || "—") + "<br>" +\n' +
-'          "\\uD83D\\uDCCD " + d.kmTotal.toFixed(1) + " km<br>" +\n' +
-'          "\\uD83D\\uDD50 <span style=\\"color:#888;font-size:11px\\">" + d.timestamp + "</span></div>";\n' +
+'          "\\uD83D\\uDCCD " + (typeof km === \'number\' ? km.toFixed(1) : km) + " km<br>" +\n' +
+'          "\\uD83D\\uDD50 <span style=\\"color:#888;font-size:11px\\">" + (d.ts || "") + "</span></div>";\n' +
 '        var iw = new google.maps.InfoWindow({ content: iwContent });\n' +
 '        var truckSvg = \'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40"><circle cx="20" cy="20" r="19" fill="\' + color + \'" stroke="#fff" stroke-width="2"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="20">\\uD83D\\uDE9A</text></svg>\';\n' +
 '        var marker = new google.maps.Marker({\n' +
@@ -1688,7 +1814,7 @@ function getAdminHtml_() {
 '      html += "<button class=\\"map-chip\\" data-idx=\\"" + i + "\\" style=\\"border-color:" + color +\n' +
 '        ";background:" + (active ? color : "#fff") + ";color:" + (active ? "#fff" : "#555") + "\\">" +\n' +
 '        "<span class=\\"map-dot\\" style=\\"background:" + color + "\\"></span>" +\n' +
-'        d.driverName + (d.vehicle ? " &middot; " + d.vehicle : "") + "</button> ";\n' +
+'        d.driverName + "</button> ";\n' +
 '    }\n' +
 '    var bar = document.getElementById("map-filter-bar");\n' +
 '    bar.innerHTML = html;\n' +
@@ -1703,14 +1829,6 @@ function getAdminHtml_() {
 '  }\n' +
 '\n' +
 '  function selectMapDriver(id) { mapSelectedId = id; renderMap(); fitMapToBounds(); }\n' +
-'\n' +
-'  function startMapAutoRefresh() {\n' +
-'    if (mapInterval) clearInterval(mapInterval);\n' +
-'    mapInterval = setInterval(function() { if (googleMap) loadMapData(); }, 15000);\n' +
-'  }\n' +
-'  function stopMapAutoRefresh() {\n' +
-'    if (mapInterval) { clearInterval(mapInterval); mapInterval = null; }\n' +
-'  }\n' +
 '\n' +
 '  // Allow pressing Enter on password field to trigger login\n' +
 '  document.getElementById("l-pw").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });\n' +
