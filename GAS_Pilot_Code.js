@@ -1258,7 +1258,7 @@ function getAdminHtml_() {
 '    .refresh-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }\n' +
 '    .refresh-btn { background: #E8EEF7; border: none; border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 13px; font-weight: 600; color: #0D47A1; }\n' +
 '    .as-of { color: #888; font-size: 12px; margin-left: 12px; }\n' +
-'    #map-container { width: 100%; height: 520px; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }\n' +
+'    #map-container { position: relative; width: 100%; height: 520px; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }\n' +
 '    .map-filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }\n' +
 '    .map-chip { padding: 6px 14px; border-radius: 16px; border: 1.5px solid #DDD; background: #fff; color: #555; cursor: pointer; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }\n' +
 '    .map-chip.all-active { background: #0D47A1; border-color: #0D47A1; color: #fff; }\n' +
@@ -1424,10 +1424,7 @@ function getAdminHtml_() {
 '    document.querySelectorAll(".tab").forEach(function(t, i) { t.classList.toggle("active", i === n); });\n' +
 '    document.querySelectorAll(".panel").forEach(function(p, i) { p.classList.toggle("active", i === n); });\n' +
 '    if (n === 7) {\n' +
-'      mapFirstFitDone = false;\n' +
-'      if (window.google && window.google.maps) {\n' +
-'        if (!googleMap) initMap(); else loadMapData();\n' +
-'      }\n' +
+'      loadMapData();\n' +
 '    } else {\n' +
 '      stopMapSubscription();\n' +
 '    }\n' +
@@ -1544,9 +1541,6 @@ function getAdminHtml_() {
 '    return firebase.database();\n' +
 '  }\n' +
 '\n' +
-'  var googleMap        = null;\n' +
-'  var mapMarkers       = {};\n' +
-'  var mapPolylines     = {};\n' +
 '  var mapDriversData   = [];\n' +
 '  var mapRouteByShift  = {};\n' +
 '  var mapSnappedByShift= {};\n' +
@@ -1556,8 +1550,6 @@ function getAdminHtml_() {
 '  var mapSelectedId    = null;\n' +
 '  var mapColorMap      = {};\n' +
 '  var mapLiveRef       = null;\n' +
-'  var mapApiLoading    = false;\n' +
-'  var mapFirstFitDone  = false;\n' +
 '  var MAP_COLORS = ["#E53935","#7B1FA2","#00897B","#F57C00","#0288D1","#558B2F","#AD1457","#795548"];\n' +
 '  var FACILITY_LAT = 24.903892;\n' +
 '  var FACILITY_LNG = 55.114065;\n' +
@@ -1639,32 +1631,6 @@ function getAdminHtml_() {
 '    return mapColorMap[driverId];\n' +
 '  }\n' +
 '\n' +
-'  function loadGoogleMapsScript() {\n' +
-'    if (mapApiLoading) return;\n' +
-'    mapApiLoading = true;\n' +
-'    var s = document.createElement("script");\n' +
-'    s.src = "https://maps.googleapis.com/maps/api/js?key=" + MAPS_KEY + "&callback=initMap";\n' +
-'    s.async = true; s.defer = true;\n' +
-'    document.head.appendChild(s);\n' +
-'  }\n' +
-'\n' +
-'  function initMap() {\n' +
-'    mapApiLoading = false;\n' +
-'    if (!document.getElementById(\'panel-7\').classList.contains(\'active\')) return;\n' +
-'    googleMap = new google.maps.Map(document.getElementById("map-container"), {\n' +
-'      zoom: 11,\n' +
-'      center: { lat: FACILITY_LAT, lng: FACILITY_LNG },\n' +
-'      mapTypeId: "roadmap",\n' +
-'    });\n' +
-'    new google.maps.Marker({\n' +
-'      position: { lat: FACILITY_LAT, lng: FACILITY_LNG },\n' +
-'      map: googleMap,\n' +
-'      title: "RSA Facility",\n' +
-'      icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(\'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 52" width="48" height="52"><text x="50%" y="46" dominant-baseline="middle" text-anchor="middle" font-size="40">\\uD83C\\uDFE0</text></svg>\'), scaledSize: new google.maps.Size(48, 52), anchor: new google.maps.Point(24, 52) },\n' +
-'      zIndex: 100,\n' +
-'    });\n' +
-'    startMapSubscription();\n' +
-'  }\n' +
 '\n' +
 '  function startMapSubscription() {\n' +
 '    stopMapSubscription();\n' +
@@ -1695,7 +1661,6 @@ function getAdminHtml_() {
 '            mapRouteByShift[rowId] = pts;\n' +
 '            mapRouteData[driverId] = pts;\n' +
 '            renderMap();\n' +
-'            if (!mapFirstFitDone && mapDriversData.length > 0) { fitMapToBounds(); mapFirstFitDone = true; }\n' +
 '            snapToRoads(rdpSimplify(pts, 8)).then(function(snapped) {\n' +
 '              mapSnappedByShift[rowId] = snapped;\n' +
 '              mapRouteData[driverId]   = snapped;\n' +
@@ -1742,66 +1707,58 @@ function getAdminHtml_() {
 '    mapSnappedByShift = {};\n' +
 '    mapShiftToDriver  = {};\n' +
 '    mapRouteData      = {};\n' +
-'    mapFirstFitDone   = false;\n' +
 '    startMapSubscription();\n' +
 '  }\n' +
 '\n' +
 '  function renderMap() {\n' +
-'    if (!googleMap) return;\n' +
-'    Object.values(mapMarkers).forEach(function(m) { m.setMap(null); });\n' +
-'    Object.values(mapPolylines).forEach(function(p) { p.setMap(null); });\n' +
-'    mapMarkers = {}; mapPolylines = {};\n' +
 '    var display = mapSelectedId\n' +
 '      ? mapDriversData.filter(function(d) { return d.driverId === mapSelectedId; })\n' +
 '      : mapDriversData;\n' +
-'    var bounds = new google.maps.LatLngBounds();\n' +
-'    bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });\n' +
+'    var parts = [\n' +
+'      \'size=800x500\', \'scale=2\', \'key=\' + MAPS_KEY,\n' +
+'      \'markers=color:blue|label:F|\' + FACILITY_LAT + \',\' + FACILITY_LNG\n' +
+'    ];\n' +
+'    var hasPos = false;\n' +
 '    display.forEach(function(d) {\n' +
-'      var color = getMapColor(d.driverId);\n' +
-'      var pts   = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
+'      var hex = getMapColor(d.driverId).replace(\'#\', \'\');\n' +
+'      var pts = mapRouteData[d.driverId] || [];\n' +
 '      if (pts.length >= 2) {\n' +
-'        mapPolylines[d.driverId] = new google.maps.Polyline({\n' +
-'          path: pts, geodesic: true,\n' +
-'          strokeColor: color, strokeOpacity: 1.0, strokeWeight: 4, map: googleMap,\n' +
-'        });\n' +
-'        pts.forEach(function(p) { bounds.extend(p); });\n' +
+'        var step = Math.max(1, Math.floor(pts.length / 60));\n' +
+'        var sampled = [];\n' +
+'        for (var i = 0; i < pts.length; i += step) sampled.push(pts[i]);\n' +
+'        if (sampled[sampled.length-1] !== pts[pts.length-1]) sampled.push(pts[pts.length-1]);\n' +
+'        parts.push(\'path=color:0x\' + hex + \'ff|weight:4|\' +\n' +
+'          sampled.map(function(p) { return p.lat + \',\' + p.lng; }).join(\'|\'));\n' +
 '      }\n' +
 '      if (d.lat && d.lng) {\n' +
-'        var km = d.km !== undefined ? d.km : 0;\n' +
-'        var iwContent = "<div style=\\"padding:8px;min-width:190px;font-family:sans-serif\\">" +\n' +
-'          "<strong style=\\"font-size:14px\\">" + d.driverName + "</strong><br>" +\n' +
-'          "\\uD83D\\uDE9A " + (d.vehicle || "—") + "<br>" +\n' +
-'          "\\uD83D\\uDCCD " + (typeof km === \'number\' ? km.toFixed(1) : km) + " km<br>" +\n' +
-'          "\\uD83D\\uDD50 <span style=\\"color:#888;font-size:11px\\">" + (d.ts || "") + "</span></div>";\n' +
-'        var iw = new google.maps.InfoWindow({ content: iwContent });\n' +
-'        var truckSvg = \'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40" width="40" height="40"><circle cx="20" cy="20" r="19" fill="\' + color + \'" stroke="#fff" stroke-width="2"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" font-size="20">\\uD83D\\uDE9A</text></svg>\';\n' +
-'        var marker = new google.maps.Marker({\n' +
-'          position: { lat: d.lat, lng: d.lng },\n' +
-'          map: googleMap, title: d.driverName,\n' +
-'          icon: { url: "data:image/svg+xml;charset=UTF-8," + encodeURIComponent(truckSvg), scaledSize: new google.maps.Size(40, 40), anchor: new google.maps.Point(20, 20) },\n' +
-'          zIndex: 200,\n' +
-'        });\n' +
-'        (function(mk, iwin) { mk.addListener("click", function() { iwin.open(googleMap, mk); }); })(marker, iw);\n' +
-'        mapMarkers[d.driverId] = marker;\n' +
-'        bounds.extend({ lat: d.lat, lng: d.lng });\n' +
+'        var init = (d.driverName || \'?\')[0].toUpperCase();\n' +
+'        parts.push(\'markers=color:0x\' + hex + \'|label:\' + init + \'|\' + d.lat + \',\' + d.lng);\n' +
+'        hasPos = true;\n' +
 '      }\n' +
 '    });\n' +
+'    if (!hasPos) parts.push(\'center=\' + FACILITY_LAT + \',\' + FACILITY_LNG + \'&zoom=12\');\n' +
+'    var url = \'https://maps.googleapis.com/maps/api/staticmap?\' + parts.join(\'&\');\n' +
+'    document.getElementById(\'map-container\').innerHTML =\n' +
+'      \'<img src="\' + url + \'" style="width:100%;height:100%;object-fit:cover;border-radius:12px" onerror="mapImgError(this)">\'\n' +
+'      + \'<div id="map-driver-info" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;flex-wrap:wrap"></div>\';\n' +
+'    var infoHtml = \'\';\n' +
+'    display.forEach(function(d) {\n' +
+'      if (!d.lat && !d.lng) return;\n' +
+'      var color = getMapColor(d.driverId);\n' +
+'      var km = d.km !== undefined ? (+d.km).toFixed(1) : \'0.0\';\n' +
+'      infoHtml += \'<div style="background:rgba(255,255,255,0.93);border-left:4px solid\' + color + \';border-radius:6px;padding:6px 10px;font-size:12px;font-family:sans-serif;box-shadow:0 1px 4px rgba(0,0,0,0.15)">\' +\n' +
+'        \'<strong>\' + d.driverName + \'</strong><br>\' + (d.vehicle || \'—\') + \' · \' + km + \' km</div>\';\n' +
+'    });\n' +
+'    var infoEl = document.getElementById(\'map-driver-info\');\n' +
+'    if (infoEl) infoEl.innerHTML = infoHtml;\n' +
+'    document.getElementById(\'map-last-update\').textContent =\n' +
+'      \'Live \\u2022 \' + new Date().toLocaleTimeString(\'en-GB\');\n' +
 '    renderMapFilterBar();\n' +
 '  }\n' +
 '\n' +
-'  function fitMapToBounds() {\n' +
-'    if (!googleMap) return;\n' +
-'    var display = mapSelectedId\n' +
-'      ? mapDriversData.filter(function(d) { return d.driverId === mapSelectedId; })\n' +
-'      : mapDriversData;\n' +
-'    var bounds = new google.maps.LatLngBounds();\n' +
-'    bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });\n' +
-'    display.forEach(function(d) {\n' +
-'      var pts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
-'      pts.forEach(function(p) { bounds.extend(p); });\n' +
-'      if (d.lat && d.lng) bounds.extend({ lat: d.lat, lng: d.lng });\n' +
-'    });\n' +
-'    if (!bounds.isEmpty()) googleMap.fitBounds(bounds, { top: 60, right: 40, bottom: 40, left: 40 });\n' +
+'  function mapImgError(img) {\n' +
+'    img.parentElement.innerHTML =\n' +
+'      \'<div style="padding:40px;text-align:center;color:#888;font-size:14px">Map unavailable — ensure <b>Maps Static API</b> is enabled in Cloud Console for this key.</div>\';\n' +
 '  }\n' +
 '\n' +
 '  function renderMapFilterBar() {\n' +
@@ -1823,17 +1780,16 @@ function getAdminHtml_() {
 '      var idx = parseInt(btn.getAttribute("data-idx"));\n' +
 '      if (idx < 0) { mapSelectedId = null; }\n' +
 '      else { var dr = mapDriversData[idx]; mapSelectedId = dr ? dr.driverId : null; }\n' +
-'      renderMap(); fitMapToBounds();\n' +
+'      renderMap();\n' +
 '    };\n' +
 '  }\n' +
 '\n' +
-'  function selectMapDriver(id) { mapSelectedId = id; renderMap(); fitMapToBounds(); }\n' +
+'  function selectMapDriver(id) { mapSelectedId = id; renderMap(); }\n' +
 '\n' +
 '  // Allow pressing Enter on password field to trigger login\n' +
 '  document.getElementById("l-pw").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });\n' +
 '  document.getElementById("l-uid").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });\n' +
 '</script>\n' +
-'<script async src="https://maps.googleapis.com/maps/api/js?callback=initMap&key=' + GOOGLE_MAPS_API_KEY + '"></script>\n' +
 '</body>\n' +
 '</html>';
 }
