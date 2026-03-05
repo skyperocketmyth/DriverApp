@@ -1,0 +1,316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RSA Live Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    #map { width: 100%; height: 100%; }
+    #filter-bar {
+      position: absolute; top: 10px; left: 50%; transform: translateX(-50%);
+      z-index: 1000; display: flex; gap: 6px; flex-wrap: wrap; justify-content: center;
+      max-width: calc(100% - 80px);
+    }
+    .chip {
+      padding: 5px 12px; border-radius: 14px; border: 1.5px solid #DDD;
+      background: #fff; color: #555; cursor: pointer; font-size: 12px; font-weight: 600;
+      display: inline-flex; align-items: center; gap: 5px;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.12); white-space: nowrap;
+      transition: background 0.15s, color 0.15s;
+    }
+    .chip.all-active { background: #0D47A1; border-color: #0D47A1; color: #fff; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    #status-bar {
+      position: absolute; bottom: 25px; right: 10px; z-index: 1000;
+      background: rgba(255,255,255,0.92); border-radius: 8px;
+      padding: 6px 12px; font-size: 12px; color: #555;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.15);
+    }
+    #status-bar .dot-live {
+      display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+      background: #4CAF50; margin-right: 5px; vertical-align: middle;
+      animation: pulse 1.5s infinite;
+    }
+    @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
+    .leaflet-popup-content { margin: 10px 14px; }
+  </style>
+</head>
+<body>
+<div id="map"></div>
+<div id="filter-bar"><span style="color:#888;font-size:12px;padding:6px 0">Connecting to Firebase…</span></div>
+<div id="status-bar"><span class="dot-live"></span><span id="status-text">Connecting…</span></div>
+
+<script>
+  var MAPS_KEY     = 'AIzaSyCEO-OiBPuSJ8iGZuR8nXIJ9tGL-uVby1c';
+  var FACILITY     = { lat: 24.903892, lng: 55.114065 };
+  var MAP_COLORS   = ['#E53935','#7B1FA2','#00897B','#F57C00','#0288D1','#558B2F','#AD1457','#795548'];
+
+  var FIREBASE_CONFIG = {
+    apiKey:            'AIzaSyDHm_ZE5GjDoMep9J-ayKsvMOijJxliqlk',
+    authDomain:        'warehouse-stock-take.firebaseapp.com',
+    databaseURL:       'https://warehouse-stock-take-default-rtdb.firebaseio.com',
+    projectId:         'warehouse-stock-take',
+    storageBucket:     'warehouse-stock-take.firebasestorage.app',
+    messagingSenderId: '740578243967',
+    appId:             '1:740578243967:web:b092549d9a6f71450fd64a'
+  };
+
+  // ── Init Leaflet map ──────────────────────────────────────────────────────
+  var leafletMap = L.map('map').setView([FACILITY.lat, FACILITY.lng], 13);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19
+  }).addTo(leafletMap);
+
+  // Facility marker
+  L.marker([FACILITY.lat, FACILITY.lng], {
+    icon: L.divIcon({
+      html: '<div style="font-size:22px;line-height:1;filter:drop-shadow(0 1px 3px rgba(0,0,0,0.4))">🏠</div>',
+      className: '', iconSize: [28, 28], iconAnchor: [14, 28], popupAnchor: [0, -28]
+    }),
+    zIndexOffset: 1000
+  }).addTo(leafletMap).bindPopup('<b style="font-size:13px">RSA Facility</b>');
+
+  // ── State ─────────────────────────────────────────────────────────────────
+  var colorMap          = {};
+  var layersByDriver    = {};
+  var driversData       = [];
+  var routeByShift      = {};
+  var snappedByShift    = {};
+  var routeListeners    = {};
+  var routeData         = {};
+  var selectedId        = null;
+  var liveRef           = null;
+  var firstFitDone      = false;
+  var _fbInited         = false;
+
+  function getDb() {
+    if (!_fbInited) { firebase.initializeApp(FIREBASE_CONFIG); _fbInited = true; }
+    return firebase.database();
+  }
+
+  function getColor(id) {
+    if (!colorMap[id]) colorMap[id] = MAP_COLORS[Object.keys(colorMap).length % MAP_COLORS.length];
+    return colorMap[id];
+  }
+
+  // ── RDP simplification ────────────────────────────────────────────────────
+  function perpDist(pt, s, e) {
+    var dx = e.lat - s.lat, dy = e.lng - s.lng;
+    if (dx === 0 && dy === 0) {
+      return Math.sqrt(Math.pow((pt.lat-s.lat)*111320,2) + Math.pow((pt.lng-s.lng)*111320*Math.cos(s.lat*Math.PI/180),2));
+    }
+    var t  = Math.max(0, Math.min(1, ((pt.lat-s.lat)*dx+(pt.lng-s.lng)*dy)/(dx*dx+dy*dy)));
+    var px = (s.lat+t*dx-pt.lat)*111320, py = (s.lng+t*dy-pt.lng)*111320*Math.cos(pt.lat*Math.PI/180);
+    return Math.sqrt(px*px+py*py);
+  }
+  function rdp(pts, eps) {
+    if (pts.length < 3) return pts;
+    var maxD = 0, idx = 0;
+    for (var i = 1; i < pts.length-1; i++) { var d = perpDist(pts[i],pts[0],pts[pts.length-1]); if (d > maxD) { maxD = d; idx = i; } }
+    if (maxD > eps) { var l = rdp(pts.slice(0,idx+1),eps), r = rdp(pts.slice(idx),eps); return l.slice(0,-1).concat(r); }
+    return [pts[0], pts[pts.length-1]];
+  }
+  function filterOutliers(pts) {
+    if (pts.length < 2) return pts;
+    var R = 6371000, out = [pts[0]];
+    for (var i = 1; i < pts.length; i++) {
+      var p = pts[i], q = out[out.length-1];
+      var dLat = (p.lat-q.lat)*Math.PI/180, dLng = (p.lng-q.lng)*Math.PI/180;
+      var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(q.lat*Math.PI/180)*Math.cos(p.lat*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
+      if (R*2*Math.atan2(Math.sqrt(a),Math.sqrt(1-a)) < 5000) out.push(p);
+    }
+    return out;
+  }
+
+  // ── Roads API snapping ───────────────────────────────────────────────────
+  async function snapToRoads(rawPts) {
+    if (!rawPts || rawPts.length < 2) return rawPts || [];
+    var snapped = [];
+    for (var i = 0; i < rawPts.length; i += 90) {
+      var chunk = rawPts.slice(i, Math.min(i+90, rawPts.length));
+      var path  = chunk.map(function(p) { return p.lat+','+p.lng; }).join('|');
+      try {
+        var resp = await fetch('https://roads.googleapis.com/v1/snapToRoads?interpolate=true&key='+MAPS_KEY+'&path='+encodeURIComponent(path));
+        if (resp.ok) {
+          var data = await resp.json();
+          if (data.snappedPoints && data.snappedPoints.length) {
+            data.snappedPoints.forEach(function(sp) { snapped.push({ lat: sp.location.latitude, lng: sp.location.longitude }); });
+            continue;
+          }
+        }
+      } catch(_) {}
+      chunk.forEach(function(p) { snapped.push(p); });
+    }
+    return snapped.length >= 2 ? snapped : rawPts;
+  }
+
+  // ── Render ────────────────────────────────────────────────────────────────
+  function renderMap() {
+    // Remove old layers
+    Object.values(layersByDriver).forEach(function(l) {
+      if (l.marker)   leafletMap.removeLayer(l.marker);
+      if (l.polyline) leafletMap.removeLayer(l.polyline);
+    });
+    layersByDriver = {};
+
+    var display = selectedId
+      ? driversData.filter(function(d) { return d.driverId === selectedId; })
+      : driversData;
+
+    var bounds  = L.latLngBounds();
+    var hasPts  = false;
+    bounds.extend([FACILITY.lat, FACILITY.lng]);
+
+    display.forEach(function(d) {
+      var color    = getColor(d.driverId);
+      var pts      = (routeData[d.driverId] || []).map(function(p) { return [p.lat, p.lng]; });
+      var polyline = null;
+
+      if (pts.length >= 2) {
+        polyline = L.polyline(pts, { color: color, weight: 4, opacity: 0.85 }).addTo(leafletMap);
+        pts.forEach(function(p) { bounds.extend(p); hasPts = true; });
+      }
+
+      var marker = null;
+      if (d.lat && d.lng) {
+        var km = d.km !== undefined ? (+d.km).toFixed(1) : '0.0';
+        marker = L.marker([d.lat, d.lng], {
+          icon: L.divIcon({
+            html: '<div style="width:36px;height:36px;border-radius:50%;background:'+color+
+                  ';border:2.5px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,0.35);display:flex;align-items:center;justify-content:center;font-size:17px;">🚚</div>',
+            className: '', iconSize: [36,36], iconAnchor: [18,18], popupAnchor: [0,-20]
+          }),
+          zIndexOffset: 500
+        }).addTo(leafletMap).bindPopup(
+          '<div style="min-width:170px;font-family:sans-serif;font-size:13px">' +
+          '<strong style="font-size:14px">'+d.driverName+'</strong><br>' +
+          '🚚 '+(d.vehicle||'—')+'<br>' +
+          '📍 '+km+' km driven<br>' +
+          '🕐 <span style="color:#888;font-size:11px">'+(d.ts||'—')+'</span>' +
+          '</div>'
+        );
+        bounds.extend([d.lat, d.lng]);
+        hasPts = true;
+      }
+
+      layersByDriver[d.driverId] = { marker: marker, polyline: polyline };
+    });
+
+    if (!firstFitDone && hasPts) {
+      leafletMap.fitBounds(bounds, { padding: [50, 50] });
+      firstFitDone = true;
+    }
+
+    renderFilterBar();
+  }
+
+  function renderFilterBar() {
+    var html = '<button class="chip all-active" onclick="selectDriver(null)">All Drivers</button>';
+    driversData.forEach(function(d) {
+      var color  = getColor(d.driverId);
+      var active = selectedId === d.driverId;
+      html += '<button class="chip'+(active?' all-active':'')+'" '+
+              'style="border-color:'+color+(active?';background:'+color+';color:#fff':'')+'" '+
+              'onclick="selectDriver(\''+d.driverId+'\')">'+
+              '<span class="dot" style="background:'+color+'"></span>'+d.driverName+'</button>';
+    });
+    var bar = document.getElementById('filter-bar');
+    bar.innerHTML = html;
+  }
+
+  function selectDriver(id) {
+    selectedId   = id;
+    firstFitDone = false;
+    renderMap();
+    // Fit to selected driver
+    if (id) {
+      var d   = driversData.find(function(x) { return x.driverId === id; });
+      var pts = (routeData[id] || []).map(function(p) { return [p.lat, p.lng]; });
+      if (d && d.lat && d.lng) pts.push([d.lat, d.lng]);
+      if (pts.length) leafletMap.fitBounds(L.latLngBounds(pts), { padding: [50, 50] });
+    }
+  }
+
+  // ── Firebase subscription ─────────────────────────────────────────────────
+  function startSubscription() {
+    stopSubscription();
+    firstFitDone = false;
+    var today = new Date().toISOString().slice(0, 10);
+    var db    = getDb();
+
+    liveRef = db.ref('gps/live');
+    liveRef.on('value', function(snapshot) {
+      var val     = snapshot.val() || {};
+      var drivers = Object.values(val).filter(function(d) { return d.date === today; });
+      driversData = drivers;
+
+      drivers.forEach(function(d) {
+        if (!d.shiftRowId || routeListeners[d.shiftRowId] !== undefined) return;
+        routeByShift[d.shiftRowId]   = [];
+        snappedByShift[d.shiftRowId] = null;
+        routeListeners[d.shiftRowId] = null;
+
+        (function(rowId, driverId) {
+          var seenKeys = {};
+          db.ref('gps/routes/'+rowId).orderByChild('ts').once('value', function(snap) {
+            var rval = snap.val() || {};
+            Object.keys(rval).forEach(function(k) { seenKeys[k] = true; });
+            var pts = Object.values(rval)
+              .sort(function(a,b) { return a.ts > b.ts ? 1 : -1; })
+              .map(function(p) { return { lat: p.lat, lng: p.lng }; });
+            pts = filterOutliers(pts);
+            routeByShift[rowId]  = pts;
+            routeData[driverId]  = pts;
+            renderMap();
+
+            snapToRoads(rdp(pts, 8)).then(function(snapped) {
+              snappedByShift[rowId] = snapped;
+              routeData[driverId]   = snapped;
+              renderMap();
+            });
+
+            var routeRef = db.ref('gps/routes/'+rowId).orderByChild('ts');
+            routeListeners[rowId] = routeRef;
+            routeRef.on('child_added', function(childSnap) {
+              if (seenKeys[childSnap.key]) return;
+              seenKeys[childSnap.key] = true;
+              var p = childSnap.val();
+              if (!p || !p.lat || !p.lng) return;
+              var newPt = { lat: p.lat, lng: p.lng };
+              routeByShift[rowId].push(newPt);
+              if (snappedByShift[rowId]) snappedByShift[rowId].push(newPt);
+              routeData[driverId] = snappedByShift[rowId] || routeByShift[rowId];
+              renderMap();
+            });
+          });
+        })(d.shiftRowId, d.driverId);
+      });
+
+      // Sync latest route data for already-subscribed drivers
+      drivers.forEach(function(d) {
+        if (d.shiftRowId && snappedByShift[d.shiftRowId])      routeData[d.driverId] = snappedByShift[d.shiftRowId];
+        else if (d.shiftRowId && routeByShift[d.shiftRowId])   routeData[d.driverId] = routeByShift[d.shiftRowId];
+      });
+
+      renderMap();
+      document.getElementById('status-text').textContent = 'Live \u2022 ' + new Date().toLocaleTimeString('en-GB');
+    });
+  }
+
+  function stopSubscription() {
+    if (liveRef) { liveRef.off(); liveRef = null; }
+    Object.values(routeListeners).forEach(function(ref) { if (ref) ref.off(); });
+    routeListeners = {}; routeByShift = {}; snappedByShift = {}; routeData = {};
+  }
+
+  startSubscription();
+</script>
+</body>
+</html>

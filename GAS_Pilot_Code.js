@@ -1258,13 +1258,7 @@ function getAdminHtml_() {
 '    .refresh-row { display: flex; justify-content: flex-end; margin-bottom: 12px; }\n' +
 '    .refresh-btn { background: #E8EEF7; border: none; border-radius: 8px; padding: 8px 16px; cursor: pointer; font-size: 13px; font-weight: 600; color: #0D47A1; }\n' +
 '    .as-of { color: #888; font-size: 12px; margin-left: 12px; }\n' +
-'    #map-container { position: relative; width: 100%; height: 520px; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }\n' +
-'    .map-filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }\n' +
-'    .map-chip { padding: 6px 14px; border-radius: 16px; border: 1.5px solid #DDD; background: #fff; color: #555; cursor: pointer; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; gap: 6px; }\n' +
-'    .map-chip.all-active { background: #0D47A1; border-color: #0D47A1; color: #fff; }\n' +
-'    .map-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; }\n' +
-'    .map-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }\n' +
-'    @media (max-width: 600px) { .cards { flex-direction: column; } .panel { padding: 12px; } #map-container { height: 360px; } }\n' +
+'    @media (max-width: 600px) { .cards { flex-direction: column; } .panel { padding: 12px; } }\n' +
 '    .spinner { display:inline-block; width:14px; height:14px; border:2px solid rgba(255,255,255,0.4); border-radius:50%; border-top-color:#fff; animation:spin 0.7s linear infinite; vertical-align:middle; margin-right:6px; }\n' +
 '    @keyframes spin { to { transform:rotate(360deg); } }\n' +
 '  </style>\n' +
@@ -1353,23 +1347,16 @@ function getAdminHtml_() {
 '  </div>\n' +
 '\n' +
 '  <!-- Tab 7: Live Map -->\n' +
-'  <div class="panel" id="panel-7">\n' +
-'    <div class="map-filter-bar" id="map-filter-bar">\n' +
-'      <button class="map-chip all-active" onclick="selectMapDriver(null)">All Drivers</button>\n' +
-'    </div>\n' +
-'    <div class="map-meta">\n' +
-'      <span id="map-last-update" style="font-size:12px;color:#888"></span>\n' +
-'      <button class="refresh-btn" onclick="loadMapData()">&#8635; Refresh</button>\n' +
-'    </div>\n' +
-'    <div id="map-container"></div>\n' +
+'  <div class="panel" id="panel-7" style="padding:0">\n' +
+'    <iframe id="map-iframe"\n' +
+'      src="https://skyperocketmyth.github.io/DriverApp/map.html"\n' +
+'      style="width:100%;height:calc(100vh - 120px);min-height:500px;border:none;display:block">\n' +
+'    </iframe>\n' +
 '  </div>\n' +
 '</div>\n' +
 '\n' +
-'<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>\n' +
-'<script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>\n' +
 '<script>\n' +
-'  var GAS_URL  = "' + gasUrl + '";\n' +
-'  var MAPS_KEY = "' + GOOGLE_MAPS_API_KEY + '";\n' +
+'  var GAS_URL = "' + gasUrl + '";\n' +
 '  var adminPass = "";\n' +
 '  var adminId   = "";\n' +
 '\n' +
@@ -1423,11 +1410,6 @@ function getAdminHtml_() {
 '  function showTab(n) {\n' +
 '    document.querySelectorAll(".tab").forEach(function(t, i) { t.classList.toggle("active", i === n); });\n' +
 '    document.querySelectorAll(".panel").forEach(function(p, i) { p.classList.toggle("active", i === n); });\n' +
-'    if (n === 7) {\n' +
-'      loadMapData();\n' +
-'    } else {\n' +
-'      stopMapSubscription();\n' +
-'    }\n' +
 '  }\n' +
 '\n' +
 '  function loadDashboard() {\n' +
@@ -1523,268 +1505,6 @@ function getAdminHtml_() {
 '    return \'<div class="card"><div class="val">\' + (value !== undefined && value !== null ? value : "—") + \'</div><div class="lbl">\' + label + \'</div></div>\';\n' +
 '  }\n' +
 '\n' +
-'  // =============================================================\n' +
-'  // Live Map — Firebase Realtime DB\n' +
-'  // =============================================================\n' +
-'  var FIREBASE_CONFIG = {\n' +
-'    apiKey:            "AIzaSyDHm_ZE5GjDoMep9J-ayKsvMOijJxliqlk",\n' +
-'    authDomain:        "warehouse-stock-take.firebaseapp.com",\n' +
-'    databaseURL:       "https://warehouse-stock-take-default-rtdb.firebaseio.com",\n' +
-'    projectId:         "warehouse-stock-take",\n' +
-'    storageBucket:     "warehouse-stock-take.firebasestorage.app",\n' +
-'    messagingSenderId: "740578243967",\n' +
-'    appId:             "1:740578243967:web:b092549d9a6f71450fd64a"\n' +
-'  };\n' +
-'  var _fbInited = false;\n' +
-'  function getDb() {\n' +
-'    if (!_fbInited) { firebase.initializeApp(FIREBASE_CONFIG); _fbInited = true; }\n' +
-'    return firebase.database();\n' +
-'  }\n' +
-'\n' +
-'  var mapDriversData   = [];\n' +
-'  var mapRouteByShift  = {};\n' +
-'  var mapSnappedByShift= {};\n' +
-'  var mapRouteListeners= {};\n' +
-'  var mapShiftToDriver = {};\n' +
-'  var mapRouteData     = {};\n' +
-'  var mapSelectedId    = null;\n' +
-'  var mapColorMap      = {};\n' +
-'  var mapLiveRef       = null;\n' +
-'  var MAP_COLORS = ["#E53935","#7B1FA2","#00897B","#F57C00","#0288D1","#558B2F","#AD1457","#795548"];\n' +
-'  var FACILITY_LAT = 24.903892;\n' +
-'  var FACILITY_LNG = 55.114065;\n' +
-'\n' +
-'  function filterRouteOutliers(points) {\n' +
-'    if (points.length < 2) return points;\n' +
-'    var R = 6371000;\n' +
-'    var filtered = [points[0]];\n' +
-'    for (var i = 1; i < points.length; i++) {\n' +
-'      var prev = filtered[filtered.length - 1];\n' +
-'      var dLat = (points[i].lat - prev.lat) * Math.PI / 180;\n' +
-'      var dLng = (points[i].lng - prev.lng) * Math.PI / 180;\n' +
-'      var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(prev.lat*Math.PI/180)*Math.cos(points[i].lat*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);\n' +
-'      var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));\n' +
-'      if (dist < 5000) filtered.push(points[i]);\n' +
-'    }\n' +
-'    return filtered;\n' +
-'  }\n' +
-'\n' +
-'  function perpendicularDist(pt, s, e) {\n' +
-'    var dx = e.lat - s.lat, dy = e.lng - s.lng;\n' +
-'    if (dx === 0 && dy === 0) {\n' +
-'      var dlat = (pt.lat - s.lat) * 111320;\n' +
-'      var dlng = (pt.lng - s.lng) * 111320 * Math.cos(s.lat * Math.PI / 180);\n' +
-'      return Math.sqrt(dlat*dlat + dlng*dlng);\n' +
-'    }\n' +
-'    var t = Math.max(0, Math.min(1, ((pt.lat-s.lat)*dx + (pt.lng-s.lng)*dy) / (dx*dx + dy*dy)));\n' +
-'    var px = (s.lat + t*dx - pt.lat) * 111320;\n' +
-'    var py = (s.lng + t*dy - pt.lng) * 111320 * Math.cos(pt.lat * Math.PI / 180);\n' +
-'    return Math.sqrt(px*px + py*py);\n' +
-'  }\n' +
-'\n' +
-'  function rdpSimplify(pts, eps) {\n' +
-'    if (pts.length < 3) return pts;\n' +
-'    var maxD = 0, idx = 0;\n' +
-'    var s = pts[0], e = pts[pts.length - 1];\n' +
-'    for (var i = 1; i < pts.length - 1; i++) {\n' +
-'      var d = perpendicularDist(pts[i], s, e);\n' +
-'      if (d > maxD) { maxD = d; idx = i; }\n' +
-'    }\n' +
-'    if (maxD > eps) {\n' +
-'      var l = rdpSimplify(pts.slice(0, idx + 1), eps);\n' +
-'      var r = rdpSimplify(pts.slice(idx), eps);\n' +
-'      return l.slice(0, -1).concat(r);\n' +
-'    }\n' +
-'    return [s, e];\n' +
-'  }\n' +
-'\n' +
-'  async function snapToRoads(rawPts) {\n' +
-'    if (!rawPts || rawPts.length < 2) return rawPts || [];\n' +
-'    var snapped = [];\n' +
-'    for (var i = 0; i < rawPts.length; i += 90) {\n' +
-'      var chunk = rawPts.slice(i, Math.min(i + 90, rawPts.length));\n' +
-'      var path  = chunk.map(function(p) { return p.lat + \',\' + p.lng; }).join(\'|\');\n' +
-'      var url   = \'https://roads.googleapis.com/v1/snapToRoads?interpolate=true&key=\'\n' +
-'                  + MAPS_KEY + \'&path=\' + encodeURIComponent(path);\n' +
-'      try {\n' +
-'        var resp = await fetch(url);\n' +
-'        if (resp.ok) {\n' +
-'          var data = await resp.json();\n' +
-'          if (data.snappedPoints && data.snappedPoints.length) {\n' +
-'            data.snappedPoints.forEach(function(sp) {\n' +
-'              snapped.push({ lat: sp.location.latitude, lng: sp.location.longitude });\n' +
-'            });\n' +
-'            continue;\n' +
-'          }\n' +
-'        }\n' +
-'      } catch(_) {}\n' +
-'      chunk.forEach(function(p) { snapped.push(p); });\n' +
-'    }\n' +
-'    return snapped.length >= 2 ? snapped : rawPts;\n' +
-'  }\n' +
-'\n' +
-'  function getMapColor(driverId) {\n' +
-'    if (!mapColorMap[driverId]) {\n' +
-'      var idx = Object.keys(mapColorMap).length;\n' +
-'      mapColorMap[driverId] = MAP_COLORS[idx % MAP_COLORS.length];\n' +
-'    }\n' +
-'    return mapColorMap[driverId];\n' +
-'  }\n' +
-'\n' +
-'\n' +
-'  function startMapSubscription() {\n' +
-'    stopMapSubscription();\n' +
-'    var today = new Date().toISOString().slice(0, 10);\n' +
-'    var db = getDb();\n' +
-'    mapLiveRef = db.ref(\'gps/live\');\n' +
-'    mapLiveRef.on(\'value\', function(snapshot) {\n' +
-'      var val = snapshot.val() || {};\n' +
-'      var drivers = Object.values(val).filter(function(d) { return d.date === today; });\n' +
-'      mapDriversData = drivers;\n' +
-'      drivers.forEach(function(d) {\n' +
-'        if (d.shiftRowId) mapShiftToDriver[d.shiftRowId] = d.driverId;\n' +
-'      });\n' +
-'      drivers.forEach(function(d) {\n' +
-'        if (!d.shiftRowId || mapRouteListeners[d.shiftRowId] !== undefined) return;\n' +
-'        mapRouteByShift[d.shiftRowId]   = [];\n' +
-'        mapSnappedByShift[d.shiftRowId] = null;\n' +
-'        mapRouteListeners[d.shiftRowId] = null;\n' +
-'        (function(rowId, driverId) {\n' +
-'          var seenKeys = {};\n' +
-'          db.ref(\'gps/routes/\' + rowId).orderByChild(\'ts\').once(\'value\', function(snap) {\n' +
-'            var rval = snap.val() || {};\n' +
-'            Object.keys(rval).forEach(function(k) { seenKeys[k] = true; });\n' +
-'            var pts = Object.values(rval)\n' +
-'              .sort(function(a, b) { return a.ts > b.ts ? 1 : -1; })\n' +
-'              .map(function(p) { return { lat: p.lat, lng: p.lng }; });\n' +
-'            pts = filterRouteOutliers(pts);\n' +
-'            mapRouteByShift[rowId] = pts;\n' +
-'            mapRouteData[driverId] = pts;\n' +
-'            renderMap();\n' +
-'            snapToRoads(rdpSimplify(pts, 8)).then(function(snapped) {\n' +
-'              mapSnappedByShift[rowId] = snapped;\n' +
-'              mapRouteData[driverId]   = snapped;\n' +
-'              renderMap();\n' +
-'            });\n' +
-'            var routeRef = db.ref(\'gps/routes/\' + rowId).orderByChild(\'ts\');\n' +
-'            mapRouteListeners[rowId] = routeRef;\n' +
-'            routeRef.on(\'child_added\', function(childSnap) {\n' +
-'              if (seenKeys[childSnap.key]) return;\n' +
-'              seenKeys[childSnap.key] = true;\n' +
-'              var p = childSnap.val();\n' +
-'              if (!p || !p.lat || !p.lng) return;\n' +
-'              var newPt = { lat: p.lat, lng: p.lng };\n' +
-'              mapRouteByShift[rowId].push(newPt);\n' +
-'              if (mapSnappedByShift[rowId]) mapSnappedByShift[rowId].push(newPt);\n' +
-'              mapRouteData[driverId] = mapSnappedByShift[rowId] || mapRouteByShift[rowId];\n' +
-'              renderMap();\n' +
-'            });\n' +
-'          });\n' +
-'        })(d.shiftRowId, d.driverId);\n' +
-'      });\n' +
-'      drivers.forEach(function(d) {\n' +
-'        if (d.shiftRowId && mapSnappedByShift[d.shiftRowId]) {\n' +
-'          mapRouteData[d.driverId] = mapSnappedByShift[d.shiftRowId];\n' +
-'        } else if (d.shiftRowId && mapRouteByShift[d.shiftRowId]) {\n' +
-'          mapRouteData[d.driverId] = mapRouteByShift[d.shiftRowId];\n' +
-'        }\n' +
-'      });\n' +
-'      renderMap();\n' +
-'      document.getElementById("map-last-update").textContent =\n' +
-'        "Live \\u2022 " + new Date().toLocaleTimeString("en-GB");\n' +
-'    });\n' +
-'  }\n' +
-'\n' +
-'  function stopMapSubscription() {\n' +
-'    if (mapLiveRef) { mapLiveRef.off(); mapLiveRef = null; }\n' +
-'    Object.values(mapRouteListeners).forEach(function(ref) { if (ref) ref.off(); });\n' +
-'    mapRouteListeners = {};\n' +
-'  }\n' +
-'\n' +
-'  function loadMapData() {\n' +
-'    stopMapSubscription();\n' +
-'    mapRouteByShift   = {};\n' +
-'    mapSnappedByShift = {};\n' +
-'    mapShiftToDriver  = {};\n' +
-'    mapRouteData      = {};\n' +
-'    startMapSubscription();\n' +
-'  }\n' +
-'\n' +
-'  function renderMap() {\n' +
-'    var display = mapSelectedId\n' +
-'      ? mapDriversData.filter(function(d) { return d.driverId === mapSelectedId; })\n' +
-'      : mapDriversData;\n' +
-'    var parts = [\n' +
-'      \'size=800x500\', \'scale=2\', \'key=\' + MAPS_KEY,\n' +
-'      \'markers=color:blue|label:F|\' + FACILITY_LAT + \',\' + FACILITY_LNG\n' +
-'    ];\n' +
-'    var hasPos = false;\n' +
-'    display.forEach(function(d) {\n' +
-'      var hex = getMapColor(d.driverId).replace(\'#\', \'\');\n' +
-'      var pts = mapRouteData[d.driverId] || [];\n' +
-'      if (pts.length >= 2) {\n' +
-'        var step = Math.max(1, Math.floor(pts.length / 60));\n' +
-'        var sampled = [];\n' +
-'        for (var i = 0; i < pts.length; i += step) sampled.push(pts[i]);\n' +
-'        if (sampled[sampled.length-1] !== pts[pts.length-1]) sampled.push(pts[pts.length-1]);\n' +
-'        parts.push(\'path=color:0x\' + hex + \'ff|weight:4|\' +\n' +
-'          sampled.map(function(p) { return p.lat + \',\' + p.lng; }).join(\'|\'));\n' +
-'      }\n' +
-'      if (d.lat && d.lng) {\n' +
-'        var init = (d.driverName || \'?\')[0].toUpperCase();\n' +
-'        parts.push(\'markers=color:0x\' + hex + \'|label:\' + init + \'|\' + d.lat + \',\' + d.lng);\n' +
-'        hasPos = true;\n' +
-'      }\n' +
-'    });\n' +
-'    if (!hasPos) parts.push(\'center=\' + FACILITY_LAT + \',\' + FACILITY_LNG + \'&zoom=12\');\n' +
-'    var url = \'https://maps.googleapis.com/maps/api/staticmap?\' + parts.join(\'&\');\n' +
-'    document.getElementById(\'map-container\').innerHTML =\n' +
-'      \'<img src="\' + url + \'" style="width:100%;height:100%;object-fit:cover;border-radius:12px" onerror="mapImgError(this)">\'\n' +
-'      + \'<div id="map-driver-info" style="position:absolute;bottom:12px;left:12px;display:flex;gap:8px;flex-wrap:wrap"></div>\';\n' +
-'    var infoHtml = \'\';\n' +
-'    display.forEach(function(d) {\n' +
-'      if (!d.lat && !d.lng) return;\n' +
-'      var color = getMapColor(d.driverId);\n' +
-'      var km = d.km !== undefined ? (+d.km).toFixed(1) : \'0.0\';\n' +
-'      infoHtml += \'<div style="background:rgba(255,255,255,0.93);border-left:4px solid\' + color + \';border-radius:6px;padding:6px 10px;font-size:12px;font-family:sans-serif;box-shadow:0 1px 4px rgba(0,0,0,0.15)">\' +\n' +
-'        \'<strong>\' + d.driverName + \'</strong><br>\' + (d.vehicle || \'—\') + \' · \' + km + \' km</div>\';\n' +
-'    });\n' +
-'    var infoEl = document.getElementById(\'map-driver-info\');\n' +
-'    if (infoEl) infoEl.innerHTML = infoHtml;\n' +
-'    document.getElementById(\'map-last-update\').textContent =\n' +
-'      \'Live \\u2022 \' + new Date().toLocaleTimeString(\'en-GB\');\n' +
-'    renderMapFilterBar();\n' +
-'  }\n' +
-'\n' +
-'  function mapImgError(img) {\n' +
-'    img.parentElement.innerHTML =\n' +
-'      \'<div style="padding:40px;text-align:center;color:#888;font-size:14px">Map unavailable — ensure <b>Maps Static API</b> is enabled in Cloud Console for this key.</div>\';\n' +
-'  }\n' +
-'\n' +
-'  function renderMapFilterBar() {\n' +
-'    var html = "<button class=\\"map-chip" + (!mapSelectedId ? " all-active" : "") + "\\" data-idx=\\"-1\\">All Drivers</button> ";\n' +
-'    for (var i = 0; i < mapDriversData.length; i++) {\n' +
-'      var d = mapDriversData[i];\n' +
-'      var color = getMapColor(d.driverId);\n' +
-'      var active = mapSelectedId === d.driverId;\n' +
-'      html += "<button class=\\"map-chip\\" data-idx=\\"" + i + "\\" style=\\"border-color:" + color +\n' +
-'        ";background:" + (active ? color : "#fff") + ";color:" + (active ? "#fff" : "#555") + "\\">" +\n' +
-'        "<span class=\\"map-dot\\" style=\\"background:" + color + "\\"></span>" +\n' +
-'        d.driverName + "</button> ";\n' +
-'    }\n' +
-'    var bar = document.getElementById("map-filter-bar");\n' +
-'    bar.innerHTML = html;\n' +
-'    bar.onclick = function(e) {\n' +
-'      var btn = e.target.closest("[data-idx]");\n' +
-'      if (!btn) return;\n' +
-'      var idx = parseInt(btn.getAttribute("data-idx"));\n' +
-'      if (idx < 0) { mapSelectedId = null; }\n' +
-'      else { var dr = mapDriversData[idx]; mapSelectedId = dr ? dr.driverId : null; }\n' +
-'      renderMap();\n' +
-'    };\n' +
-'  }\n' +
-'\n' +
-'  function selectMapDriver(id) { mapSelectedId = id; renderMap(); }\n' +
 '\n' +
 '  // Allow pressing Enter on password field to trigger login\n' +
 '  document.getElementById("l-pw").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });\n' +
