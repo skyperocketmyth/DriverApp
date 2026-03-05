@@ -51,9 +51,8 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
       const speed    = location.coords.speed;
       const accuracy = location.coords.accuracy;
 
-      // Reject cell-tower-only fixes (accuracy 100m+).
-      // In-car GPS with BestForNavigation typically reads 5-40m.
-      if (accuracy !== null && accuracy > 40) continue;
+      // Reject cell-tower-only fixes. In-car GPS with BestForNavigation typically reads 5-20m.
+      if (accuracy !== null && accuracy > 30) continue;
 
       // --- KM accumulation + movement detection ---
       const lastPosStr = await AsyncStorage.getItem(KEY_LAST_POS);
@@ -63,6 +62,12 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
         try {
           const lastPos    = JSON.parse(lastPosStr);
           metresFromLast   = distanceMetres(lastPos.lat, lastPos.lng, newLat, newLng);
+
+          // Reject teleport jumps (GPS cold-start / signal loss) — skip entire point.
+          const timeDeltaMs    = lastPos.ts ? (new Date(now) - new Date(lastPos.ts)) : 0;
+          const impliedSpeedKmh = timeDeltaMs > 0 ? (metresFromLast / (timeDeltaMs / 3600000)) : 0;
+          if (impliedSpeedKmh > 200) continue;
+
           const speedKnown = speed !== null && speed >= 0;
           isMoving         = speedKnown ? speed >= 1.0 : metresFromLast > 30;
 
@@ -103,7 +108,7 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
             } else {
               const lastRoutePos   = JSON.parse(lastRoutePosStr);
               const metresFromRoute = distanceMetres(lastRoutePos.lat, lastRoutePos.lng, newLat, newLng);
-              appendRoute = metresFromRoute > 30;
+              appendRoute = metresFromRoute > 25;
             }
           }
 

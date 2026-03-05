@@ -137,26 +137,37 @@
     return out;
   }
 
-  // ── Roads API snapping ───────────────────────────────────────────────────
+  // ── OSRM road-snapping (matches AdminDashboard approach, no API key needed) ──
   async function snapToRoads(rawPts) {
     if (!rawPts || rawPts.length < 2) return rawPts || [];
-    var snapped = [];
-    for (var i = 0; i < rawPts.length; i += 90) {
-      var chunk = rawPts.slice(i, Math.min(i+90, rawPts.length));
-      var path  = chunk.map(function(p) { return p.lat+','+p.lng; }).join('|');
-      try {
-        var resp = await fetch('https://roads.googleapis.com/v1/snapToRoads?interpolate=true&key='+MAPS_KEY+'&path='+encodeURIComponent(path));
-        if (resp.ok) {
-          var data = await resp.json();
-          if (data.snappedPoints && data.snappedPoints.length) {
-            data.snappedPoints.forEach(function(sp) { snapped.push({ lat: sp.location.latitude, lng: sp.location.longitude }); });
-            continue;
-          }
-        }
-      } catch(_) {}
-      chunk.forEach(function(p) { snapped.push(p); });
+    var simplified = rdp(filterOutliers(rawPts), 8);
+    if (simplified.length < 2) return rawPts;
+
+    var pts = simplified;
+    if (pts.length > 100) {
+      var step = Math.ceil(pts.length / 100);
+      var out = [];
+      for (var i = 0; i < pts.length; i += step) out.push(pts[i]);
+      if (out[out.length - 1] !== pts[pts.length - 1]) out.push(pts[pts.length - 1]);
+      pts = out;
     }
-    return snapped.length >= 2 ? snapped : rawPts;
+
+    var coords = pts.map(function(p) { return p.lng + ',' + p.lat; }).join(';');
+    try {
+      var resp = await fetch(
+        'https://router.project-osrm.org/route/v1/driving/' + coords +
+        '?overview=full&geometries=geojson'
+      );
+      if (!resp.ok) return simplified;
+      var data = await resp.json();
+      if (!data.routes || !data.routes[0] || !data.routes[0].geometry) return simplified;
+      var snapped = data.routes[0].geometry.coordinates.map(function(c) {
+        return { lat: c[1], lng: c[0] };
+      });
+      return snapped.length >= 2 ? snapped : simplified;
+    } catch(_) {
+      return simplified;
+    }
   }
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -236,9 +247,31 @@
     bar.innerHTML = html;
   }
 
+  function cleanupDriverLocally(id) {
+    if (layersByDriver[id]) {
+      if (layersByDriver[id].marker)   leafletMap.removeLayer(layersByDriver[id].marker);
+      if (layersByDriver[id].polyline) leafletMap.removeLayer(layersByDriver[id].polyline);
+      delete layersByDriver[id];
+    }
+    var d = driversData.find(function(x) { return x.driverId === id; });
+    if (d && d.shiftRowId) {
+      var rowId = d.shiftRowId;
+      if (routeListeners[rowId]) { routeListeners[rowId].off(); }
+      delete routeListeners[rowId];
+      delete routeByShift[rowId];
+      delete snappedByShift[rowId];
+    }
+    delete routeData[id];
+    delete colorMap[id];
+    driversData = driversData.filter(function(x) { return x.driverId !== id; });
+    if (selectedId === id) selectedId = null;
+  }
+
   function removeDriver(id, name) {
-    if (!confirm('Remove "' + name + '" from the live map?\n\nThis only clears the Firebase pin — it does not affect the Google Sheet.')) return;
+    if (!confirm('Remove "' + name + '" from the live map?\n\nThis only clears the Firebase pin — it does not affect the Google Sheet or GPS route history.')) return;
     getDb().ref('gps/live/' + id).remove();
+    cleanupDriverLocally(id);
+    renderMap();
   }
 
   function selectDriver(id) {
@@ -262,6 +295,12 @@
     var db    = getDb();
 
     liveRef = db.ref('gps/live');
+
+    liveRef.on('child_removed', function(snapshot) {
+      cleanupDriverLocally(snapshot.key);
+      renderFilterBar();
+    });
+
     liveRef.on('value', function(snapshot) {
       var val     = snapshot.val() || {};
       var drivers = Object.values(val).filter(function(d) { return d.date === today; });
