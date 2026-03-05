@@ -73,6 +73,54 @@ function rdpSimplify(pts, eps) {
   return [s, e];
 }
 
+// Downsample long polylines before hitting the snapping API
+function downsampleForSnap(points, maxPoints = 100) {
+  if (points.length <= maxPoints) return points;
+  const step = Math.ceil(points.length / maxPoints);
+  const out = [];
+  for (let i = 0; i < points.length; i += step) {
+    out.push(points[i]);
+  }
+  const last = points[points.length - 1];
+  const lastOut = out[out.length - 1];
+  if (!lastOut || lastOut.latitude !== last.latitude || lastOut.longitude !== last.longitude) {
+    out.push(last);
+  }
+  return out;
+}
+
+// OSRM demo map-matching — no API key required (zero-cost pilot).
+// Falls back to the original points if the service is unavailable.
+async function snapRouteToRoads(points) {
+  if (!points || points.length < 2) return points || [];
+  try {
+    const simplified = rdpSimplify(filterRouteOutliers(points), 8);
+    const pts = downsampleForSnap(simplified);
+    if (pts.length < 2) return simplified;
+
+    const coords = pts
+      .map(p => `${p.longitude},${p.latitude}`)
+      .join(';');
+
+    const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+    const resp = await fetch(url);
+    if (!resp.ok) return simplified;
+    const data = await resp.json();
+    if (!data.routes || !data.routes[0] || !data.routes[0].geometry || !data.routes[0].geometry.coordinates) {
+      return simplified;
+    }
+
+    const snapped = data.routes[0].geometry.coordinates.map(([lng, lat]) => ({
+      latitude: lat,
+      longitude: lng,
+    }));
+
+    return snapped.length >= 2 ? snapped : simplified;
+  } catch {
+    return points;
+  }
+}
+
 const CHART_W  = SCREEN_W - 48;
 
 const CHART_CONFIG = {
@@ -432,10 +480,18 @@ function MapTab({ liveOpsData }) {
   // Subscribe to Firebase live positions — fires on every driver position update
   useEffect(() => {
     const unsubscribe = subscribeToLivePositions(async (firebaseDrivers) => {
-      // Enrich with vehicle + stage from GAS live ops (join on driverName)
       const ops = liveOpsData || [];
-      const enriched = firebaseDrivers.map(d => {
-        const op = ops.find(o => o.driverName === d.driverName);
+      // Only show drivers who have an active (non-completed) shift in GAS.
+      // Fall back to showing all Firebase drivers if GAS data hasn't loaded yet.
+      const active = ops.length > 0
+        ? firebaseDrivers.filter(d => {
+            const op = ops.find(o => String(o.driverId) === String(d.driverId));
+            return op && !op.hasCompleted;
+          })
+        : firebaseDrivers;
+      // Enrich with vehicle + stage from GAS live ops (join on driverId)
+      const enriched = active.map(d => {
+        const op = ops.find(o => String(o.driverId) === String(d.driverId));
         return { ...d, vehicle: op?.vehicle || '', currentStage: op?.currentStage };
       });
       setDrivers(enriched);
@@ -449,11 +505,11 @@ function MapTab({ liveOpsData }) {
         firebaseDrivers
           .filter(d => d.shiftRowId && !routeCache.current[d.shiftRowId])
           .map(async d => {
-            const raw  = await fetchShiftRoute(d.shiftRowId);
+            const raw    = await fetchShiftRoute(d.shiftRowId);
             const mapped = raw.map(p => ({ latitude: p.lat, longitude: p.lng }));
-            const pts  = rdpSimplify(filterRouteOutliers(mapped), 8);
-            newRoutes[d.shiftRowId] = pts;
-            routeCache.current[d.shiftRowId] = pts;
+            const snapped = await snapRouteToRoads(mapped);
+            newRoutes[d.shiftRowId] = snapped;
+            routeCache.current[d.shiftRowId] = snapped;
             routeChanged = true;
           })
       );
@@ -480,11 +536,11 @@ function MapTab({ liveOpsData }) {
     if (!selectedId) return;
     const driver = drivers.find(d => d.driverId === selectedId);
     if (!driver?.shiftRowId) return;
-    fetchShiftRoute(driver.shiftRowId).then(raw => {
-      const mapped = raw.map(p => ({ latitude: p.lat, longitude: p.lng }));
-      const pts = rdpSimplify(filterRouteOutliers(mapped), 8);
-      routeCache.current[driver.shiftRowId] = pts;
-      setRoutes(prev => ({ ...prev, [driver.driverId]: pts }));
+    fetchShiftRoute(driver.shiftRowId).then(async raw => {
+      const mapped  = raw.map(p => ({ latitude: p.lat, longitude: p.lng }));
+      const snapped = await snapRouteToRoads(mapped);
+      routeCache.current[driver.shiftRowId] = snapped;
+      setRoutes(prev => ({ ...prev, [driver.driverId]: snapped }));
     }).catch(() => {});
   }, [selectedId]);
 

@@ -55,9 +55,9 @@
 <div id="status-bar"><span class="dot-live"></span><span id="status-text">Connecting…</span></div>
 
 <script>
-  var MAPS_KEY     = 'AIzaSyCEO-OiBPuSJ8iGZuR8nXIJ9tGL-uVby1c';
   var FACILITY     = { lat: 24.903892, lng: 55.114065 };
   var MAP_COLORS   = ['#E53935','#7B1FA2','#00897B','#F57C00','#0288D1','#558B2F','#AD1457','#795548'];
+  var GAS_URL      = 'https://script.google.com/macros/s/AKfycbyFz0vqYmZZkuBDktzQ0G2ElvVeGBC6zxA873oSv49-oZ7ir_cwM3a10tGvPM_kiyqjYg/exec';
 
   var FIREBASE_CONFIG = {
     apiKey:            'AIzaSyDHm_ZE5GjDoMep9J-ayKsvMOijJxliqlk',
@@ -97,6 +97,23 @@
   var liveRef           = null;
   var firstFitDone      = false;
   var _fbInited         = false;
+
+  // Drivers validated as active in GAS (null = not yet loaded; show all as fallback)
+  var validDriverIds    = null;
+  // Drivers dismissed via X this session — kept out even if phone keeps pinging
+  var dismissedIds      = {};
+
+  // Poll GAS every 60s to get the set of driver IDs with active (non-completed) shifts.
+  // Map only shows pins whose driverId is in this set.
+  async function syncValidDrivers() {
+    try {
+      var resp = await fetch(GAS_URL + '?action=getLiveOperations');
+      var data = await resp.json();
+      var ops  = (data.operations || []).filter(function(op) { return !op.hasCompleted; });
+      validDriverIds = new Set(ops.map(function(op) { return String(op.driverId); }));
+      renderMap();
+    } catch(_) { /* keep previous validDriverIds on GAS failure */ }
+  }
 
   function getDb() {
     if (!_fbInited) { firebase.initializeApp(FIREBASE_CONFIG); _fbInited = true; }
@@ -268,7 +285,8 @@
   }
 
   function removeDriver(id, name) {
-    if (!confirm('Remove "' + name + '" from the live map?\n\nThis only clears the Firebase pin — it does not affect the Google Sheet or GPS route history.')) return;
+    if (!confirm('Remove "' + name + '" from the live map?\n\nThe driver will not reappear on this page even if their device is still transmitting.')) return;
+    dismissedIds[id] = true;
     getDb().ref('gps/live/' + id).remove();
     cleanupDriverLocally(id);
     renderMap();
@@ -303,7 +321,13 @@
 
     liveRef.on('value', function(snapshot) {
       var val     = snapshot.val() || {};
-      var drivers = Object.values(val).filter(function(d) { return d.date === today; });
+      var drivers = Object.values(val).filter(function(d) {
+        if (d.date !== today) return false;
+        if (dismissedIds[d.driverId]) return false;
+        // If GAS validation has loaded, only show drivers with an active shift in GAS
+        if (validDriverIds !== null && !validDriverIds.has(String(d.driverId))) return false;
+        return true;
+      });
       driversData = drivers;
 
       drivers.forEach(function(d) {
@@ -365,6 +389,8 @@
     routeListeners = {}; routeByShift = {}; snappedByShift = {}; routeData = {};
   }
 
+  syncValidDrivers();
+  setInterval(syncValidDrivers, 60000);
   startSubscription();
 </script>
 </body>
