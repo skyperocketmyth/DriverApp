@@ -89,12 +89,15 @@ function downsampleForSnap(points, maxPoints = 100) {
   return out;
 }
 
-// OSRM demo map-matching — no API key required (zero-cost pilot).
+// OSRM map-matching — snaps GPS traces to actual roads driven.
+// Uses /match (not /route) so the result follows the recorded trace,
+// not the theoretically fastest route between waypoints.
 // Falls back to the original points if the service is unavailable.
 async function snapRouteToRoads(points) {
   if (!points || points.length < 2) return points || [];
   try {
-    const simplified = rdpSimplify(filterRouteOutliers(points), 8);
+    const cleaned = filterRouteOutliers(points);
+    const simplified = rdpSimplify(cleaned, 15);
     const pts = downsampleForSnap(simplified);
     if (pts.length < 2) return simplified;
 
@@ -102,20 +105,28 @@ async function snapRouteToRoads(points) {
       .map(p => `${p.longitude},${p.latitude}`)
       .join(';');
 
-    const url = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson`;
+    // /match API: map-matches GPS trace to road network.
+    // radiuses=25 tells OSRM each point is accurate to ~25m.
+    const radiuses = pts.map(() => '25').join(';');
+    const url = `https://router.project-osrm.org/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
     const resp = await fetch(url);
     if (!resp.ok) return simplified;
     const data = await resp.json();
-    if (!data.routes || !data.routes[0] || !data.routes[0].geometry || !data.routes[0].geometry.coordinates) {
+    if (!data.matchings || !data.matchings[0] || !data.matchings[0].geometry || !data.matchings[0].geometry.coordinates) {
       return simplified;
     }
 
-    const snapped = data.routes[0].geometry.coordinates.map(([lng, lat]) => ({
-      latitude: lat,
-      longitude: lng,
-    }));
+    // Concatenate all matchings (OSRM may split into segments if gaps are too large)
+    const allCoords = [];
+    for (const matching of data.matchings) {
+      if (matching.geometry && matching.geometry.coordinates) {
+        for (const [lng, lat] of matching.geometry.coordinates) {
+          allCoords.push({ latitude: lat, longitude: lng });
+        }
+      }
+    }
 
-    return snapped.length >= 2 ? snapped : simplified;
+    return allCoords.length >= 2 ? allCoords : simplified;
   } catch {
     return points;
   }
@@ -466,8 +477,11 @@ function MapTab({ liveOpsData }) {
   const [lastUpdate, setLastUpdate] = useState(null);
   const mapRef      = useRef(null);
   const colorMap    = useRef({});
-  const routeCache  = useRef({});   // shiftRowId → points (avoid re-fetching)
+  const routeCache  = useRef({});   // shiftRowId → { points, fetchedAt }
   const fittedOnce  = useRef(false);
+
+  const ROUTE_REFRESH_MS = 30000;   // re-fetch active routes every 30s
+  const driverFirstSeen = useRef({}); // grace period tracking for new drivers
 
   function getColor(driverId) {
     if (!colorMap.current[driverId]) {
@@ -479,14 +493,24 @@ function MapTab({ liveOpsData }) {
 
   // Subscribe to Firebase live positions — fires on every driver position update
   useEffect(() => {
+    // Clear route cache on mount so new sessions always start fresh
+    routeCache.current = {};
+    fittedOnce.current = false;
+
     const unsubscribe = subscribeToLivePositions(async (firebaseDrivers) => {
       const ops = liveOpsData ?? null;
-      // Only show drivers who have an active (non-completed) shift in GAS.
-      // Fall back to showing all Firebase drivers only when liveOpsData hasn't
-      // loaded yet (null/undefined). An empty array means GAS loaded but no
-      // active shifts — correctly hides all phantom pins.
+      const now = Date.now();
+      // Track when each driver first appears in Firebase
+      firebaseDrivers.forEach(d => {
+        if (!driverFirstSeen.current[d.driverId]) driverFirstSeen.current[d.driverId] = now;
+      });
+      // Only filter against GAS once driver has been visible for >90s.
+      // This ensures a new driver's pin appears immediately after Stage 1,
+      // even before the admin dashboard has refreshed GAS data.
       const active = ops != null
         ? firebaseDrivers.filter(d => {
+            const age = now - (driverFirstSeen.current[d.driverId] || 0);
+            if (age < 90000) return true; // grace period — show without GAS check
             const op = ops.find(o => String(o.driverId) === String(d.driverId));
             return op && !op.hasCompleted;
           })
@@ -500,31 +524,36 @@ function MapTab({ liveOpsData }) {
       setLastUpdate(new Date().toLocaleTimeString('en-GB'));
       setLoading(false);
 
-      // Fetch routes for any driver whose shiftRowId we haven't loaded yet
+      // Fetch routes: new shifts or stale caches (older than ROUTE_REFRESH_MS)
       const newRoutes = { ...routeCache.current };
       let routeChanged = false;
       await Promise.all(
         firebaseDrivers
-          .filter(d => d.shiftRowId && !routeCache.current[d.shiftRowId])
+          .filter(d => {
+            if (!d.shiftRowId) return false;
+            const cached = routeCache.current[d.shiftRowId];
+            if (!cached) return true; // never fetched
+            return (now - cached.fetchedAt) > ROUTE_REFRESH_MS; // stale
+          })
           .map(async d => {
             const raw    = await fetchShiftRoute(d.shiftRowId);
             const mapped = raw.map(p => ({ latitude: p.lat, longitude: p.lng }));
             const snapped = await snapRouteToRoads(mapped);
-            newRoutes[d.shiftRowId] = snapped;
-            routeCache.current[d.shiftRowId] = snapped;
+            newRoutes[d.shiftRowId] = { points: snapped, fetchedAt: now };
+            routeCache.current[d.shiftRowId] = { points: snapped, fetchedAt: now };
             routeChanged = true;
           })
       );
-      if (routeChanged) {
+      if (routeChanged || !fittedOnce.current) {
         // Build driverId → points map for rendering
         const routeMap = {};
         firebaseDrivers.forEach(d => {
           if (d.shiftRowId && routeCache.current[d.shiftRowId]) {
-            routeMap[d.driverId] = routeCache.current[d.shiftRowId];
+            routeMap[d.driverId] = routeCache.current[d.shiftRowId].points;
           }
         });
         setRoutes(routeMap);
-        if (!fittedOnce.current) {
+        if (!fittedOnce.current && Object.keys(routeMap).length > 0) {
           fittedOnce.current = true;
           setTimeout(() => fitMap(enriched, routeMap, null), 400);
         }
@@ -533,7 +562,7 @@ function MapTab({ liveOpsData }) {
     return unsubscribe;
   }, [liveOpsData]);
 
-  // Re-fetch route when a driver is selected (in case cache is stale)
+  // Re-fetch route when a driver is selected (force-refresh, no staleness check)
   useEffect(() => {
     if (!selectedId) return;
     const driver = drivers.find(d => d.driverId === selectedId);
@@ -541,7 +570,7 @@ function MapTab({ liveOpsData }) {
     fetchShiftRoute(driver.shiftRowId).then(async raw => {
       const mapped  = raw.map(p => ({ latitude: p.lat, longitude: p.lng }));
       const snapped = await snapRouteToRoads(mapped);
-      routeCache.current[driver.shiftRowId] = snapped;
+      routeCache.current[driver.shiftRowId] = { points: snapped, fetchedAt: Date.now() };
       setRoutes(prev => ({ ...prev, [driver.driverId]: snapped }));
     }).catch(() => {});
   }, [selectedId]);

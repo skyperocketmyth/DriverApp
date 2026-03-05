@@ -51,8 +51,9 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
       const speed    = location.coords.speed;
       const accuracy = location.coords.accuracy;
 
-      // Reject cell-tower-only fixes. In-car GPS with BestForNavigation typically reads 5-20m.
-      if (accuracy !== null && accuracy > 30) continue;
+      // Reject cell-tower-only fixes. In urban UAE with buildings, GPS accuracy
+      // often reads 30-50m; only reject clearly bad fixes (>50m).
+      if (accuracy !== null && accuracy > 50) continue;
 
       // --- KM accumulation + movement detection ---
       const lastPosStr = await AsyncStorage.getItem(KEY_LAST_POS);
@@ -69,7 +70,7 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
           if (impliedSpeedKmh > 200) continue;
 
           const speedKnown = speed !== null && speed >= 0;
-          isMoving         = speedKnown ? speed >= 1.0 : metresFromLast > 30;
+          isMoving         = speedKnown ? speed >= 0.5 : metresFromLast > 15;
 
           if (isMoving && metresFromLast > 15) {
             const totalKmStr = await AsyncStorage.getItem(KEY_TOTAL_KM);
@@ -108,7 +109,7 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
             } else {
               const lastRoutePos   = JSON.parse(lastRoutePosStr);
               const metresFromRoute = distanceMetres(lastRoutePos.lat, lastRoutePos.lng, newLat, newLng);
-              appendRoute = metresFromRoute > 25;
+              appendRoute = metresFromRoute > 15;
             }
           }
 
@@ -199,6 +200,15 @@ export async function checkFacilityGeofence() {
 // =============================================================================
 export async function startShiftTracking(initialLat, initialLng, userId, userName, rowId) {
   try {
+    // IMPORTANT: stop old task FIRST to prevent race condition where the old task
+    // reads the new KEY_SHIFT_ACTIVE='true' and processes stale location data
+    // (which would carry over old km and facility left time into the new shift).
+    const isRunning = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK).catch(() => false);
+    if (isRunning) {
+      await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK).catch(() => {});
+    }
+
+    // Now safe to reset all tracking state for the new shift
     await AsyncStorage.multiSet([
       [KEY_LAST_POS,       JSON.stringify({ lat: initialLat || 0, lng: initialLng || 0, ts: new Date().toISOString() })],
       [KEY_LAST_ROUTE_POS, ''],
@@ -208,12 +218,6 @@ export async function startShiftTracking(initialLat, initialLng, userId, userNam
       [KEY_GPS_USER,       JSON.stringify({ userId: userId || '', userName: userName || '' })],
       [KEY_SHIFT_ROW_ID,   String(rowId || '')],
     ]);
-
-    // Always stop and restart so new config (accuracy, intervals) is applied.
-    const isRunning = await Location.hasStartedLocationUpdatesAsync(BACKGROUND_LOCATION_TASK).catch(() => false);
-    if (isRunning) {
-      await Location.stopLocationUpdatesAsync(BACKGROUND_LOCATION_TASK).catch(() => {});
-    }
 
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
       accuracy:          Location.Accuracy.BestForNavigation,

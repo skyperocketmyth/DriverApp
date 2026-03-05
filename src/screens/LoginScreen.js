@@ -136,15 +136,7 @@ export default function Stage1ArrivalScreen({ navigation }) {
       // Background task may take up to 15s to fire its first update; this closes that gap.
       saveGpsPoint(currentUser.userId, currentUser.userName, arrivalCoords.lat, arrivalCoords.lng, 0).catch(() => {});
 
-      // Navigate to Success immediately — data is confirmed saved
-      navigation.replace('Success', {
-        stage:       1,
-        message:     'Arrival recorded successfully! GPS tracking is now active.',
-        arrivalTime: result.arrivalTime,
-        driverName:  currentUser.userName,
-      });
-
-      // Start background GPS tracking after navigation (isolated — failure won't crash)
+      // Start background GPS tracking BEFORE navigation so it's ready when HomeScreen shows.
       try {
         await startShiftTracking(arrivalCoords.lat, arrivalCoords.lng, currentUser.userId, currentUser.userName, result.rowId);
       } catch (gpsErr) {
@@ -164,15 +156,22 @@ export default function Stage1ArrivalScreen({ navigation }) {
         appendRoute: true,
       });
 
-      // Request battery optimization exemption (Android) — keeps foreground GPS service alive
+      // Request battery optimization exemption (Android) — fire-and-forget BEFORE
+      // navigation so the dialog doesn't surface as an error on the Success screen.
       if (Platform.OS === 'android') {
-        try {
-          await IntentLauncher.startActivityAsync(
-            IntentLauncher.ActivityAction.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
-            { data: 'package:com.rsa.driverpilot' }
-          );
-        } catch (_) { /* non-fatal — user may have dismissed or already exempted */ }
+        IntentLauncher.startActivityAsync(
+          IntentLauncher.ActivityAction.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+          { data: 'package:com.rsa.driverpilot' }
+        ).catch(() => {}); // non-fatal — user may dismiss or already exempted
       }
+
+      // Navigate to Success — all setup is done
+      navigation.replace('Success', {
+        stage:       1,
+        message:     'Arrival recorded successfully! GPS tracking is now active.',
+        arrivalTime: result.arrivalTime,
+        driverName:  currentUser.userName,
+      });
     } catch (err) {
       Alert.alert(t('error', language), err.message || t('errServer', language));
     } finally {

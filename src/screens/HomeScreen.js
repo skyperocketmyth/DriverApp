@@ -8,8 +8,11 @@ import {
   View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
 } from 'react-native';
 import { useFocusEffect } from '@react-navigation/native';
+import * as Location from 'expo-location';
 import { useAppContext } from '../store/AppContext';
 import { getLiveGpsStats } from '../services/gps';
+import { writeGpsPoint } from '../services/firebase';
+import { distanceMetres } from '../utils/haversine';
 import { COLORS } from '../config';
 import { t, isRTL } from '../i18n/translations';
 
@@ -60,8 +63,10 @@ export default function HomeScreen({ navigation }) {
   const rtl = isRTL(language);
 
   const [liveKm, setLiveKm] = useState(0);
+  const lastFgPos = React.useRef(null); // last foreground GPS position written
 
-  // Refresh GPS km every 15 seconds while shift is active
+  // Refresh GPS km + push foreground GPS heartbeat every 15 seconds while shift is active.
+  // This supplements the background task — Android may throttle it when the app is in foreground.
   useFocusEffect(
     useCallback(() => {
       let interval;
@@ -83,7 +88,42 @@ export default function HomeScreen({ navigation }) {
       const stats = await getLiveGpsStats();
       setLiveKm(stats.totalKm || 0);
 
-      // Firebase background task writes GPS points directly — nothing to flush here.
+      // Foreground GPS heartbeat: get current position and write to Firebase as a route point
+      // if the driver has moved >15m from the last foreground-written point.
+      const shiftActive = shiftProgress?.stage1Done && !shiftProgress?.stage4Done;
+      if (shiftActive && currentUser && shiftProgress?.rowId) {
+        try {
+          const pos = await Location.getCurrentPositionAsync({
+            accuracy: Location.Accuracy.High,
+            timeout: 10000,
+          });
+          const lat = pos.coords.latitude;
+          const lng = pos.coords.longitude;
+          const acc = pos.coords.accuracy;
+
+          if (acc != null && acc <= 50) {
+            let shouldAppend = false;
+            if (!lastFgPos.current) {
+              shouldAppend = true;
+            } else {
+              const d = distanceMetres(lastFgPos.current.lat, lastFgPos.current.lng, lat, lng);
+              shouldAppend = d > 15;
+            }
+            if (shouldAppend) {
+              lastFgPos.current = { lat, lng };
+              writeGpsPoint({
+                driverId:   currentUser.userId,
+                driverName: currentUser.userName,
+                shiftRowId: String(shiftProgress.rowId),
+                lat, lng,
+                km:         stats.totalKm || 0,
+                accuracy:   acc,
+                appendRoute: true,
+              });
+            }
+          }
+        } catch (_) {}
+      }
     } catch (_) {}
   }
 

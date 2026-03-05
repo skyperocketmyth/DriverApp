@@ -111,6 +111,8 @@
   var validDriverIds    = null;
   // Drivers dismissed via X this session — kept out even if phone keeps pinging
   var dismissedIds      = {};
+  // Grace period: new drivers appearing in Firebase get 90s before GAS validation kicks in
+  var driverFirstSeen   = {};
 
   // Poll GAS every 60s to get the set of driver IDs with active (non-completed) shifts.
   // Map only shows pins whose driverId is in this set.
@@ -177,10 +179,10 @@
     return out;
   }
 
-  // ── OSRM road-snapping (matches AdminDashboard approach, no API key needed) ──
+  // ── OSRM map-matching (snaps GPS trace to actual roads driven) ──
   async function snapToRoads(rawPts) {
     if (!rawPts || rawPts.length < 2) return rawPts || [];
-    var simplified = rdp(filterOutliers(rawPts), 8);
+    var simplified = rdp(filterOutliers(rawPts), 15);
     if (simplified.length < 2) return rawPts;
 
     var pts = simplified;
@@ -192,19 +194,25 @@
       pts = out;
     }
 
-    var coords = pts.map(function(p) { return p.lng + ',' + p.lat; }).join(';');
+    var coords   = pts.map(function(p) { return p.lng + ',' + p.lat; }).join(';');
+    var radiuses = pts.map(function() { return '25'; }).join(';');
     try {
       var resp = await fetch(
-        'https://router.project-osrm.org/route/v1/driving/' + coords +
-        '?overview=full&geometries=geojson'
+        'https://router.project-osrm.org/match/v1/driving/' + coords +
+        '?overview=full&geometries=geojson&radiuses=' + radiuses
       );
       if (!resp.ok) return simplified;
       var data = await resp.json();
-      if (!data.routes || !data.routes[0] || !data.routes[0].geometry) return simplified;
-      var snapped = data.routes[0].geometry.coordinates.map(function(c) {
-        return { lat: c[1], lng: c[0] };
+      if (!data.matchings || !data.matchings[0] || !data.matchings[0].geometry) return simplified;
+      var allCoords = [];
+      data.matchings.forEach(function(m) {
+        if (m.geometry && m.geometry.coordinates) {
+          m.geometry.coordinates.forEach(function(c) {
+            allCoords.push({ lat: c[1], lng: c[0] });
+          });
+        }
       });
-      return snapped.length >= 2 ? snapped : simplified;
+      return allCoords.length >= 2 ? allCoords : simplified;
     } catch(_) {
       return simplified;
     }
@@ -344,11 +352,17 @@
 
     liveRef.on('value', function(snapshot) {
       var val     = snapshot.val() || {};
+      var now = Date.now();
       var drivers = Object.values(val).filter(function(d) {
         if (d.date !== today) return false;
         if (dismissedIds[d.driverId]) return false;
-        // If GAS validation has loaded, only show drivers with an active shift in GAS
-        if (validDriverIds !== null && !validDriverIds.has(String(d.driverId))) return false;
+        // Track when we first see each driver from Firebase
+        if (!driverFirstSeen[d.driverId]) driverFirstSeen[d.driverId] = now;
+        // Give new drivers a 90s grace period before requiring GAS validation.
+        // This ensures the pin appears immediately when a driver logs in,
+        // even before GAS has had time to sync.
+        var age = now - driverFirstSeen[d.driverId];
+        if (validDriverIds !== null && age > 90000 && !validDriverIds.has(String(d.driverId))) return false;
         return true;
       });
       driversData = drivers;
@@ -372,7 +386,7 @@
             routeData[driverId]  = pts;
             renderMap();
 
-            snapToRoads(rdp(pts, 8)).then(function(snapped) {
+            snapToRoads(rdp(pts, 15)).then(function(snapped) {
               snappedByShift[rowId] = snapped;
               routeData[driverId]   = snapped;
               renderMap();
