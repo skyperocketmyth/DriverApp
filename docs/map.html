@@ -3,11 +3,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store">
   <title>RSA Live Map</title>
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-app-compat.js"></script>
   <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-database-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.14.1/firebase-auth-compat.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; overflow: hidden; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -47,12 +49,19 @@
     }
     @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.3; } }
     .leaflet-popup-content { margin: 10px 14px; }
+    #gas-badge {
+      position: absolute; bottom: 55px; right: 10px; z-index: 1000;
+      background: rgba(255,255,255,0.92); border-radius: 8px;
+      padding: 4px 10px; font-size: 11px; color: #888;
+      box-shadow: 0 1px 6px rgba(0,0,0,0.15);
+    }
   </style>
 </head>
 <body>
 <div id="map"></div>
 <div id="filter-bar"><span style="color:#888;font-size:12px;padding:6px 0">Connecting to Firebase…</span></div>
 <div id="status-bar"><span class="dot-live"></span><span id="status-text">Connecting…</span></div>
+<div id="gas-badge">GAS: syncing…</div>
 
 <script>
   var FACILITY     = { lat: 24.903892, lng: 55.114065 };
@@ -106,7 +115,7 @@
   // Poll GAS every 60s to get the set of driver IDs with active (non-completed) shifts.
   // Map only shows pins whose driverId is in this set.
   async function syncValidDrivers() {
-    var statusEl = document.getElementById('status-text');
+    var badge = document.getElementById('gas-badge');
     try {
       var resp = await fetch(GAS_URL + '?action=getLiveOperations');
       if (!resp.ok) throw new Error('HTTP ' + resp.status);
@@ -114,15 +123,23 @@
       if (data.error) throw new Error(data.error);
       var ops  = (data.operations || []).filter(function(op) { return !op.hasCompleted; });
       validDriverIds = new Set(ops.map(function(op) { return String(op.driverId); }));
+      if (badge) badge.textContent = 'GAS: ' + ops.length + ' active';
       renderMap();
     } catch(err) {
       // Keep previous validDriverIds on failure so map doesn't blank out
-      if (statusEl) statusEl.textContent = 'GAS sync failed: ' + err.message;
+      if (badge) badge.textContent = 'GAS: ERR — ' + err.message;
     }
   }
 
   function getDb() {
-    if (!_fbInited) { firebase.initializeApp(FIREBASE_CONFIG); _fbInited = true; }
+    if (!_fbInited) {
+      firebase.initializeApp(FIREBASE_CONFIG);
+      _fbInited = true;
+      // Sign in anonymously so writes (remove) satisfy Firebase "auth != null" rules
+      firebase.auth().signInAnonymously().catch(function(e) {
+        console.warn('[Firebase] Anonymous auth failed:', e.message);
+      });
+    }
     return firebase.database();
   }
 
