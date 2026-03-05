@@ -324,21 +324,26 @@
     return firebase.database();
   }
 
-  var googleMap       = null;
-  var mapMarkers      = {};
-  var mapPolylines    = {};
-  var mapDriversData  = [];
-  var mapRouteByShift = {};  // shiftRowId → points[] (persistent cache)
-  var mapRouteData    = {};  // driverId   → points[] (used by renderMap)
-  var mapSelectedId   = null;
-  var mapColorMap     = {};
-  var mapLiveRef      = null;
-  var mapApiLoading   = false;
-  var mapFirstFitDone = false;
+  var googleMap        = null;
+  var mapMarkers       = {};
+  var mapPolylines     = {};
+  var mapDriversData   = [];
+  var mapRouteByShift  = {};  // shiftRowId → raw points[] (accumulated via child_added)
+  var mapSnappedByShift= {};  // shiftRowId → road-snapped points[]
+  var mapRouteListeners= {};  // shiftRowId → Firebase query ref (for cleanup)
+  var mapShiftToDriver = {};  // shiftRowId → driverId (reverse map for real-time appends)
+  var mapRouteData     = {};  // driverId   → points[] (used by renderMap)
+  var mapSelectedId    = null;
+  var mapColorMap      = {};
+  var mapLiveRef       = null;
+  var mapApiLoading    = false;
+  var mapFirstFitDone  = false;
   var MAP_COLORS = ["#E53935","#7B1FA2","#00897B","#F57C00","#0288D1","#558B2F","#AD1457","#795548"];
   var FACILITY_LAT = 24.903892;
   var FACILITY_LNG = 55.114065;
 
+  // Drop GPS teleportation jumps only (>5 km implies signal loss).
+  // 300 m was too aggressive — at 80 km/h every 20 s = 440 m between updates.
   function filterRouteOutliers(points) {
     if (points.length < 2) return points;
     var R = 6371000;
@@ -349,9 +354,68 @@
       var dLng = (points[i].lng - prev.lng) * Math.PI / 180;
       var a = Math.sin(dLat/2)*Math.sin(dLat/2) + Math.cos(prev.lat*Math.PI/180)*Math.cos(points[i].lat*Math.PI/180)*Math.sin(dLng/2)*Math.sin(dLng/2);
       var dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-      if (dist < 300) filtered.push(points[i]);
+      if (dist < 5000) filtered.push(points[i]);
     }
     return filtered;
+  }
+
+  // Perpendicular distance from point to line segment (returns approximate metres)
+  function perpendicularDist(pt, s, e) {
+    var dx = e.lat - s.lat, dy = e.lng - s.lng;
+    if (dx === 0 && dy === 0) {
+      var dlat = (pt.lat - s.lat) * 111320;
+      var dlng = (pt.lng - s.lng) * 111320 * Math.cos(s.lat * Math.PI / 180);
+      return Math.sqrt(dlat*dlat + dlng*dlng);
+    }
+    var t = Math.max(0, Math.min(1, ((pt.lat-s.lat)*dx + (pt.lng-s.lng)*dy) / (dx*dx + dy*dy)));
+    var px = (s.lat + t*dx - pt.lat) * 111320;
+    var py = (s.lng + t*dy - pt.lng) * 111320 * Math.cos(pt.lat * Math.PI / 180);
+    return Math.sqrt(px*px + py*py);
+  }
+
+  // Ramer-Douglas-Peucker simplification — removes collinear GPS noise (eps in metres)
+  function rdpSimplify(pts, eps) {
+    if (pts.length < 3) return pts;
+    var maxD = 0, idx = 0;
+    var s = pts[0], e = pts[pts.length - 1];
+    for (var i = 1; i < pts.length - 1; i++) {
+      var d = perpendicularDist(pts[i], s, e);
+      if (d > maxD) { maxD = d; idx = i; }
+    }
+    if (maxD > eps) {
+      var l = rdpSimplify(pts.slice(0, idx + 1), eps);
+      var r = rdpSimplify(pts.slice(idx), eps);
+      return l.slice(0, -1).concat(r);
+    }
+    return [s, e];
+  }
+
+  // Google Roads API snapToRoads — snaps raw GPS points to road centre-lines.
+  // Chunks into ≤90 points per request (API max = 100).
+  // Falls back to raw points for any failed chunk.
+  async function snapToRoads(rawPts) {
+    if (!rawPts || rawPts.length < 2) return rawPts || [];
+    var snapped = [];
+    for (var i = 0; i < rawPts.length; i += 90) {
+      var chunk = rawPts.slice(i, Math.min(i + 90, rawPts.length));
+      var path  = chunk.map(function(p) { return p.lat + ',' + p.lng; }).join('|');
+      var url   = 'https://roads.googleapis.com/v1/snapToRoads?interpolate=true&key='
+                  + MAPS_KEY + '&path=' + encodeURIComponent(path);
+      try {
+        var resp = await fetch(url);
+        if (resp.ok) {
+          var data = await resp.json();
+          if (data.snappedPoints && data.snappedPoints.length) {
+            data.snappedPoints.forEach(function(sp) {
+              snapped.push({ lat: sp.location.latitude, lng: sp.location.longitude });
+            });
+            continue;
+          }
+        }
+      } catch(_) {}
+      chunk.forEach(function(p) { snapped.push(p); }); // fallback: use raw chunk
+    }
+    return snapped.length >= 2 ? snapped : rawPts;
   }
 
   function getMapColor(driverId) {
@@ -398,47 +462,86 @@
       var drivers = Object.values(val).filter(function(d) { return d.date === today; });
       mapDriversData = drivers;
 
-      // Fetch routes for any shiftRowId not yet in cache
-      var pending = [];
+      // Update live position data and keep reverse shift→driver map current
       drivers.forEach(function(d) {
-        if (d.shiftRowId && mapRouteByShift[d.shiftRowId] === undefined) {
-          mapRouteByShift[d.shiftRowId] = null; // mark as in-flight
-          var rowId = d.shiftRowId;
-          pending.push(
-            db.ref('gps/routes/' + rowId).orderByChild('ts').once('value')
-              .then(function(snap) {
-                var rval = snap.val();
-                mapRouteByShift[rowId] = rval
-                  ? Object.values(rval)
-                      .sort(function(a, b) { return a.ts > b.ts ? 1 : -1; })
-                      .map(function(p) { return { lat: p.lat, lng: p.lng }; })
-                  : [];
-              })
-              .catch(function() { mapRouteByShift[rowId] = []; })
-          );
-        }
+        if (d.shiftRowId) mapShiftToDriver[d.shiftRowId] = d.driverId;
       });
 
-      Promise.all(pending).then(function() {
-        drivers.forEach(function(d) {
-          mapRouteData[d.driverId] = (d.shiftRowId && mapRouteByShift[d.shiftRowId]) || [];
-        });
-        renderMap();
-        if (!mapFirstFitDone && drivers.length > 0) { fitMapToBounds(); mapFirstFitDone = true; }
-        document.getElementById("map-last-update").textContent =
-          "Live \u2022 " + new Date().toLocaleTimeString("en-GB");
+      // Subscribe to each new shiftRowId's route (real-time via child_added)
+      drivers.forEach(function(d) {
+        if (!d.shiftRowId || mapRouteListeners[d.shiftRowId] !== undefined) return;
+        mapRouteByShift[d.shiftRowId]  = [];         // mark as initialising
+        mapSnappedByShift[d.shiftRowId]= null;
+        mapRouteListeners[d.shiftRowId]= null;        // placeholder until ref is stored
+
+        (function(rowId, driverId) {
+          var seenKeys = {};
+          // Step 1: fetch historical route in one read, then snap to roads
+          db.ref('gps/routes/' + rowId).orderByChild('ts').once('value', function(snap) {
+            var rval = snap.val() || {};
+            Object.keys(rval).forEach(function(k) { seenKeys[k] = true; });
+            var pts = Object.values(rval)
+              .sort(function(a, b) { return a.ts > b.ts ? 1 : -1; })
+              .map(function(p) { return { lat: p.lat, lng: p.lng }; });
+            pts = filterRouteOutliers(pts);
+            mapRouteByShift[rowId] = pts;
+            mapRouteData[driverId] = pts;
+            renderMap();
+            if (!mapFirstFitDone && mapDriversData.length > 0) { fitMapToBounds(); mapFirstFitDone = true; }
+            // Snap to roads asynchronously; render again when done
+            snapToRoads(rdpSimplify(pts, 8)).then(function(snapped) {
+              mapSnappedByShift[rowId] = snapped;
+              mapRouteData[driverId]   = snapped;
+              renderMap();
+            });
+
+            // Step 2: listen for new GPS points pushed AFTER the initial load
+            var routeRef = db.ref('gps/routes/' + rowId).orderByChild('ts');
+            mapRouteListeners[rowId] = routeRef;
+            routeRef.on('child_added', function(childSnap) {
+              if (seenKeys[childSnap.key]) return; // already in initial batch
+              seenKeys[childSnap.key] = true;
+              var p = childSnap.val();
+              if (!p || !p.lat || !p.lng) return;
+              var newPt = { lat: p.lat, lng: p.lng };
+              mapRouteByShift[rowId].push(newPt);
+              // Append raw to snapped route so the live extension is instant
+              if (mapSnappedByShift[rowId]) mapSnappedByShift[rowId].push(newPt);
+              mapRouteData[driverId] = mapSnappedByShift[rowId] || mapRouteByShift[rowId];
+              renderMap();
+            });
+          });
+        })(d.shiftRowId, d.driverId);
       });
+
+      // Update route data for already-subscribed drivers then refresh
+      drivers.forEach(function(d) {
+        if (d.shiftRowId && mapSnappedByShift[d.shiftRowId]) {
+          mapRouteData[d.driverId] = mapSnappedByShift[d.shiftRowId];
+        } else if (d.shiftRowId && mapRouteByShift[d.shiftRowId]) {
+          mapRouteData[d.driverId] = mapRouteByShift[d.shiftRowId];
+        }
+      });
+      renderMap();
+      document.getElementById("map-last-update").textContent =
+        "Live \u2022 " + new Date().toLocaleTimeString("en-GB");
     });
   }
 
   function stopMapSubscription() {
     if (mapLiveRef) { mapLiveRef.off(); mapLiveRef = null; }
+    Object.values(mapRouteListeners).forEach(function(ref) { if (ref) ref.off(); });
+    mapRouteListeners = {};
   }
 
-  // Manual refresh — clears route cache so routes are re-fetched on next Firebase event
+  // Manual refresh — clears all route caches so routes are re-fetched on next Firebase event
   function loadMapData() {
-    mapRouteByShift = {};
-    mapRouteData    = {};
+    stopMapSubscription();
+    mapRouteByShift   = {};
+    mapSnappedByShift = {};
+    mapShiftToDriver  = {};
+    mapRouteData      = {};
+    mapFirstFitDone   = false;
     startMapSubscription();
   }
 
@@ -453,13 +556,13 @@
     var bounds = new google.maps.LatLngBounds();
     bounds.extend({ lat: FACILITY_LAT, lng: FACILITY_LNG });
     display.forEach(function(d) {
-      var color  = getMapColor(d.driverId);
-      var rawPts = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });
-      var pts    = filterRouteOutliers(rawPts);
+      var color = getMapColor(d.driverId);
+      // mapRouteData already holds snapped route (or raw if snapping is pending)
+      var pts   = (mapRouteData[d.driverId] || []).map(function(p) { return { lat: p.lat, lng: p.lng }; });
       if (pts.length >= 2) {
         mapPolylines[d.driverId] = new google.maps.Polyline({
           path: pts, geodesic: true,
-          strokeColor: color, strokeOpacity: 1.0, strokeWeight: 3, map: googleMap,
+          strokeColor: color, strokeOpacity: 1.0, strokeWeight: 4, map: googleMap,
         });
         pts.forEach(function(p) { bounds.extend(p); });
       }

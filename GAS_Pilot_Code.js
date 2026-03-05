@@ -16,7 +16,7 @@ const ATTENDANCE_SHEET = 'Attendance Data';
 const USERNAMES_SHEET  = 'Usernames';
 const OVERTIME_HOURS   = 9;
 const TIMEZONE         = 'Asia/Dubai';
-const GOOGLE_MAPS_API_KEY = 'AIzaSyCEO-OiBPuSJ8iGZuR8nXIJ9tGL-uVby1c';
+const GOOGLE_MAPS_API_KEY = 'AIzaSyCkwplnJDtC5yjj8vmkiaWCBz05VJLjKl8';
 
 // Attendance Data column numbers (1-based, matching sheet columns A–Z)
 // COLUMN ORDER (26 cols):  A–O unchanged, then:
@@ -132,10 +132,6 @@ function doPost(e) {
       result = saveLastDrop(body.data);
     } else if (action === 'saveShiftEnd') {
       result = saveShiftEnd(body.data);
-    } else if (action === 'saveGpsPoint') {
-      result = saveGpsPoint(body.data);
-    } else if (action === 'saveGpsPointsBatch') {
-      result = saveGpsPointsBatch(body.data);
     } else if (action === 'updateFacilityLeft') {
       result = updateFacilityLeft(body.data);
     } else {
@@ -307,11 +303,20 @@ function formatDateOnly_(date) {
 function parseDatetimeLocal_(dtLocal) {
   if (!dtLocal) return null;
   try {
-    var p = dtLocal.split('T');
-    var d = p[0].split('-');
-    var t = (p[1] || '00:00').split(':');
-    var s = d[2] + '/' + d[1] + '/' + d[0] + ' ' + t[0] + ':' + t[1] + ':00';
-    return Utilities.parseDate(s, TIMEZONE, 'dd/MM/yyyy HH:mm:ss');
+    var s = String(dtLocal).trim();
+    // UTC ISO string from the app (new Date().toISOString() always ends with 'Z').
+    // Parse natively — JS/GAS correctly interprets the UTC moment.
+    // formatDubai_() then converts it to Dubai local time (UTC+4).
+    if (s.charAt(s.length - 1) === 'Z' || /[+-]\d\d:\d\d$/.test(s)) {
+      var d = new Date(s);
+      return isNaN(d.getTime()) ? null : d;
+    }
+    // HTML datetime-local format (no timezone = treat as Dubai local time)
+    var p  = s.split('T');
+    var dd = p[0].split('-');
+    var t  = (p[1] || '00:00').split(':');
+    var fmt = dd[2] + '/' + dd[1] + '/' + dd[0] + ' ' + t[0] + ':' + t[1] + ':00';
+    return Utilities.parseDate(fmt, TIMEZONE, 'dd/MM/yyyy HH:mm:ss');
   } catch(e) { return null; }
 }
 
@@ -1151,25 +1156,6 @@ function getLiveOperations() {
     var today  = Utilities.formatDate(now, TIMEZONE, 'dd/MM/yyyy');
     var ops    = [];
 
-    // Build a map of latest GPS km per driverId from GPS_Tracking sheet
-    // This gives real-time km for in-progress shifts (column Z only written at Stage 4)
-    var liveKmMap = {};
-    try {
-      var gpsSheet   = getOrCreateGpsTrackingSheet_();
-      var gpsLastRow = gpsSheet.getLastRow();
-      if (gpsLastRow >= 2) {
-        var gpsVals = gpsSheet.getRange(2, 1, gpsLastRow - 1, 7).getValues();
-        gpsVals.forEach(function(gr) {
-          var gpsDateVal = gr[6];
-          var gpsDate = (gpsDateVal instanceof Date) ? formatDateOnly_(gpsDateVal) : String(gpsDateVal).trim();
-          if (gpsDate !== today) return;
-          var did = String(gr[0]).trim();
-          if (!did) return;
-          liveKmMap[did] = Math.max(liveKmMap[did] || 0, Number(gr[5]) || 0);
-        });
-      }
-    } catch (_) {}
-
     values.forEach(function(row) {
       var shiftDateVal = row[COL.SHIFT_DATE - 1];
       if (!shiftDateVal) return;
@@ -1193,10 +1179,9 @@ function getLiveOperations() {
 
       var currentStage = !departDate ? 1 : !lastDrop ? 2 : !endTimeStr ? 3 : 4;
 
-      // Use live GPS km for in-progress shifts; fall back to column Z for completed shifts
-      var kmSoFar = (currentStage < 4 && liveKmMap[driverId] !== undefined)
-        ? liveKmMap[driverId]
-        : gpsKm;
+      // GPS km from column Z (written at Stage 4 end); real-time km is now tracked
+      // in Firebase RTDB gps/live and read directly by the web dashboard.
+      var kmSoFar = gpsKm;
 
       var facilityWaitMins = 0;
       if (!departDate) facilityWaitMins = Math.round((now - arrivalDate) / 60000);
@@ -1209,6 +1194,7 @@ function getLiveOperations() {
       }
 
       ops.push({
+        driverId:         driverId,
         driverName:       driverName,
         shiftStartTime:   formatDubai_(arrivalDate),
         currentStage:     currentStage,
@@ -1224,211 +1210,6 @@ function getLiveOperations() {
   } catch (err) {
     return { error: err.message };
   }
-}
-
-// =============================================================================
-// GPS TRACKING — Live driver position log
-// Sheet "GPS_Tracking": DRIVER_ID | DRIVER_NAME | TIMESTAMP | LAT | LNG | KM_TOTAL | SHIFT_DATE
-// =============================================================================
-
-var GPS_TRACKING_SHEET = 'GPS_Tracking';
-var GPS_TRACKING_HEADERS = ['DRIVER_ID', 'DRIVER_NAME', 'TIMESTAMP', 'LAT', 'LNG', 'KM_TOTAL', 'SHIFT_DATE', 'SHIFT_ROW_ID'];
-
-function getOrCreateGpsTrackingSheet_() {
-  var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
-  var sheet = ss.getSheetByName(GPS_TRACKING_SHEET);
-  if (!sheet) {
-    sheet = ss.insertSheet(GPS_TRACKING_SHEET);
-    var hdr = sheet.getRange(1, 1, 1, GPS_TRACKING_HEADERS.length);
-    hdr.setValues([GPS_TRACKING_HEADERS]);
-    hdr.setBackground('#37474F');
-    hdr.setFontColor('#FFFFFF');
-    hdr.setFontWeight('bold');
-    sheet.setFrozenRows(1);
-  }
-  return sheet;
-}
-
-// data: { driverId, driverName, lat, lng, kmTotal }
-function saveGpsPoint(data) {
-  try {
-    var sheet     = getOrCreateGpsTrackingSheet_();
-    var now       = new Date();
-    var shiftDate = formatDateOnly_(now);
-    sheet.appendRow([
-      data.driverId || '',
-      data.driverName || '',
-      formatDubai_(now),
-      Number(data.lat) || 0,
-      Number(data.lng) || 0,
-      Math.round(Number(data.kmTotal) * 100) / 100 || 0,
-      shiftDate,
-      data.shiftRowId || ''
-    ]);
-    return { success: true };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-// Batch insert GPS points — accepts { points: [{userId, userName, lat, lng, km, ts, shiftRowId}] }
-// Uses sheet.getRange().setValues() for a single write operation instead of N appendRow calls.
-// This is 10-50x faster and far more reliable over cellular than individual HTTP calls.
-function saveGpsPointsBatch(data) {
-  try {
-    var points = data && data.points;
-    if (!points || !points.length) return { success: true, inserted: 0 };
-
-    var sheet     = getOrCreateGpsTrackingSheet_();
-    var now       = new Date();
-    var shiftDate = formatDateOnly_(now);
-
-    var rows = points.map(function(p) {
-      // Use client-provided timestamp if present; otherwise fall back to server time
-      var ts = p.ts ? p.ts : formatDubai_(now);
-      return [
-        p.userId   || '',
-        p.userName || '',
-        ts,
-        Number(p.lat) || 0,
-        Number(p.lng) || 0,
-        Math.round(Number(p.km) * 100) / 100 || 0,
-        shiftDate,
-        p.shiftRowId || ''
-      ];
-    });
-
-    var startRow = sheet.getLastRow() + 1;
-    sheet.getRange(startRow, 1, rows.length, 8).setValues(rows);
-
-    return { success: true, inserted: rows.length };
-  } catch (err) {
-    return { success: false, error: err.message };
-  }
-}
-
-// Returns the latest GPS point for each driver active today
-function getActiveDriversLive() {
-  try {
-    var sheet   = getOrCreateGpsTrackingSheet_();
-    var lastRow = sheet.getLastRow();
-    if (lastRow < 2) return { success: true, drivers: [] };
-
-    var today  = formatDateOnly_(new Date());
-    var values = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
-
-    var latestByDriver = {};
-    values.forEach(function(row) {
-      // Sheets may auto-convert the date string to a Date object — handle both cases
-      var shiftDateVal = row[6];
-      var shiftDate = (shiftDateVal instanceof Date)
-        ? formatDateOnly_(shiftDateVal)
-        : String(shiftDateVal).trim();
-      if (shiftDate !== today) return;
-      var driverId = String(row[0]).trim();
-      if (!driverId) return;
-      // Keep the last (most recent) entry per driver (rows appended in order)
-      latestByDriver[driverId] = {
-        driverId:   driverId,
-        driverName: String(row[1]).trim(),
-        timestamp:  (row[2] instanceof Date) ? formatDubai_(row[2]) : String(row[2]).trim(),
-        lat:        Number(row[3]),
-        lng:        Number(row[4]),
-        kmTotal:    Number(row[5]),
-        shiftRowId: String(row[7]).trim()
-      };
-    });
-
-    return { success: true, drivers: Object.values(latestByDriver) };
-  } catch (err) {
-    return { error: err.message };
-  }
-}
-
-// Returns all GPS points for a specific driver on a specific date (dd/MM/yyyy or YYYY-MM-DD)
-// Optional shiftRowId filters to a single shift (when a driver runs multiple shifts per day)
-function getDriverRoute(driverId, dateStr, shiftRowId) {
-  try {
-    var sheet   = getOrCreateGpsTrackingSheet_();
-    var lastRow = sheet.getLastRow();
-    if (lastRow < 2) return { success: true, points: [] };
-
-    // Normalise dateStr
-    var targetDate = dateStr || formatDateOnly_(new Date());
-    if (targetDate && targetDate.indexOf('-') !== -1) {
-      var dp = targetDate.split('-');
-      targetDate = dp[2] + '/' + dp[1] + '/' + dp[0];
-    }
-
-    var values = sheet.getRange(2, 1, lastRow - 1, 8).getValues();
-    var points = [];
-    values.forEach(function(row) {
-      if (String(row[0]).trim() !== driverId) return;
-      // Sheets may auto-convert the date string to a Date object — handle both cases
-      var shiftDateVal = row[6];
-      var rowDate = (shiftDateVal instanceof Date)
-        ? formatDateOnly_(shiftDateVal)
-        : String(shiftDateVal).trim();
-      if (rowDate !== targetDate) return;
-      // If shiftRowId provided, only include points from that shift
-      if (shiftRowId && String(row[7]).trim() && String(row[7]).trim() !== String(shiftRowId)) return;
-      var ts = (row[2] instanceof Date) ? formatDubai_(row[2]) : String(row[2]).trim();
-      points.push({ timestamp: ts, lat: Number(row[3]), lng: Number(row[4]), km: Number(row[5]) });
-    });
-
-    if (points.length < 2) return { success: true, driverId: driverId, date: targetDate, points: points };
-
-    // --- Roads API snap-to-roads with 5-minute CacheService cache ---
-    var cacheKey = 'route_' + (shiftRowId ? String(shiftRowId) : driverId) + '_' + targetDate;
-    var cache    = CacheService.getScriptCache();
-    var cached   = cache.get(cacheKey);
-    if (cached) {
-      try {
-        return { success: true, driverId: driverId, date: targetDate, points: JSON.parse(cached) };
-      } catch (_) {}
-    }
-
-    var displayPoints = points;
-    var waypoints     = simplifyRoutePoints_(points, 100);
-    var snapped       = snapToRoads_(waypoints);
-    if (snapped && snapped.length > 1) displayPoints = snapped;
-
-    try { cache.put(cacheKey, JSON.stringify(displayPoints), 300); } catch (_) {}
-    return { success: true, driverId: driverId, date: targetDate, points: displayPoints };
-  } catch (err) {
-    return { error: err.message };
-  }
-}
-
-// Reduce a GPS points array to at most maxCount evenly-spaced waypoints (preserves first + last)
-function simplifyRoutePoints_(points, maxCount) {
-  if (points.length <= maxCount) return points;
-  var step = Math.ceil(points.length / maxCount);
-  var out  = [];
-  for (var i = 0; i < points.length; i += step) out.push(points[i]);
-  var last = points[points.length - 1];
-  if (out[out.length - 1] !== last) out.push(last);
-  return out;
-}
-
-// Call Google Maps Roads API snapToRoads with interpolate=true.
-// API key must be stored in GAS Script Properties as ROADS_API_KEY.
-// Returns snapped points array or null on any failure (caller falls back to raw GPS).
-function snapToRoads_(points) {
-  try {
-    var key = PropertiesService.getScriptProperties().getProperty('ROADS_API_KEY');
-    if (!key) return null;
-    var path = points.map(function(p) { return p.lat + ',' + p.lng; }).join('|');
-    var url  = 'https://roads.googleapis.com/v1/snapToRoads?path='
-               + encodeURIComponent(path) + '&interpolate=true&key=' + key;
-    var resp = UrlFetchApp.fetch(url, { muteHttpExceptions: true });
-    if (resp.getResponseCode() !== 200) return null;
-    var data = JSON.parse(resp.getContentText());
-    if (!data.snappedPoints || !data.snappedPoints.length) return null;
-    return data.snappedPoints.map(function(sp) {
-      return { lat: sp.location.latitude, lng: sp.location.longitude, km: 0 };
-    });
-  } catch (e) { return null; }
 }
 
 // =============================================================================

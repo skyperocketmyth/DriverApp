@@ -41,7 +41,7 @@ const RTDB_ROUTES = 'gps/routes';
 // when the network is available. No await needed — fire-and-forget is safe here
 // because the SDK guarantees eventual delivery.
 // =============================================================================
-export function writeGpsPoint({ driverId, driverName, shiftRowId, lat, lng, km, accuracy }) {
+export function writeGpsPoint({ driverId, driverName, shiftRowId, lat, lng, km, accuracy, appendRoute = true }) {
   const ts      = new Date().toISOString();
   const today   = ts.slice(0, 10);
   const db      = database();
@@ -59,8 +59,9 @@ export function writeGpsPoint({ driverId, driverName, shiftRowId, lat, lng, km, 
     date: today,
   });
 
-  // Append to route (push() generates an ordered unique key)
-  if (shiftRowId) {
+  // Append to route only when driver is genuinely moving (appendRoute=true).
+  // Stationary GPS jitter must not pollute the polyline.
+  if (appendRoute && shiftRowId) {
     db.ref(`${RTDB_ROUTES}/${shiftRowId}`).push({
       lat,
       lng,

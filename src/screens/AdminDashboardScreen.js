@@ -26,7 +26,8 @@ const DRIVER_COLORS = [
 
 const STAGE_NAMES = ['', 'At Facility', 'On Road', 'Last Drop Done', 'Shift Complete'];
 
-// Remove GPS jumps > 2 km between consecutive points (noise/outlier filter)
+// Drop GPS teleportation jumps only (>5 km = signal loss, not driving).
+// Old 300 m threshold incorrectly dropped highway points (80 km/h every 20 s = 440 m).
 function filterRouteOutliers(points) {
   if (points.length < 2) return points;
   const R = 6371000;
@@ -39,9 +40,37 @@ function filterRouteOutliers(points) {
       + Math.cos(prev.latitude * Math.PI / 180) * Math.cos(points[i].latitude * Math.PI / 180)
       * Math.sin(dLng / 2) ** 2;
     const dist = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    if (dist < 300) filtered.push(points[i]);
+    if (dist < 5000) filtered.push(points[i]);
   }
   return filtered;
+}
+
+// Ramer-Douglas-Peucker simplification — removes collinear GPS noise (eps in metres)
+function perpendicularDist(pt, s, e) {
+  const dx = e.latitude - s.latitude, dy = e.longitude - s.longitude;
+  if (dx === 0 && dy === 0) {
+    const dlat = (pt.latitude - s.latitude) * 111320;
+    const dlng = (pt.longitude - s.longitude) * 111320 * Math.cos(s.latitude * Math.PI / 180);
+    return Math.sqrt(dlat * dlat + dlng * dlng);
+  }
+  const t = Math.max(0, Math.min(1, ((pt.latitude - s.latitude) * dx + (pt.longitude - s.longitude) * dy) / (dx * dx + dy * dy)));
+  const px = (s.latitude + t * dx - pt.latitude) * 111320;
+  const py = (s.longitude + t * dy - pt.longitude) * 111320 * Math.cos(pt.latitude * Math.PI / 180);
+  return Math.sqrt(px * px + py * py);
+}
+
+function rdpSimplify(pts, eps) {
+  if (pts.length < 3) return pts;
+  let maxD = 0, idx = 0;
+  const s = pts[0], e = pts[pts.length - 1];
+  for (let i = 1; i < pts.length - 1; i++) {
+    const d = perpendicularDist(pts[i], s, e);
+    if (d > maxD) { maxD = d; idx = i; }
+  }
+  if (maxD > eps) {
+    return [...rdpSimplify(pts.slice(0, idx + 1), eps).slice(0, -1), ...rdpSimplify(pts.slice(idx), eps)];
+  }
+  return [s, e];
 }
 
 const CHART_W  = SCREEN_W - 48;
@@ -420,8 +449,9 @@ function MapTab({ liveOpsData }) {
         firebaseDrivers
           .filter(d => d.shiftRowId && !routeCache.current[d.shiftRowId])
           .map(async d => {
-            const raw = await fetchShiftRoute(d.shiftRowId);
-            const pts = filterRouteOutliers(raw.map(p => ({ latitude: p.lat, longitude: p.lng })));
+            const raw  = await fetchShiftRoute(d.shiftRowId);
+            const mapped = raw.map(p => ({ latitude: p.lat, longitude: p.lng }));
+            const pts  = rdpSimplify(filterRouteOutliers(mapped), 8);
             newRoutes[d.shiftRowId] = pts;
             routeCache.current[d.shiftRowId] = pts;
             routeChanged = true;
@@ -451,7 +481,8 @@ function MapTab({ liveOpsData }) {
     const driver = drivers.find(d => d.driverId === selectedId);
     if (!driver?.shiftRowId) return;
     fetchShiftRoute(driver.shiftRowId).then(raw => {
-      const pts = filterRouteOutliers(raw.map(p => ({ latitude: p.lat, longitude: p.lng })));
+      const mapped = raw.map(p => ({ latitude: p.lat, longitude: p.lng }));
+      const pts = rdpSimplify(filterRouteOutliers(mapped), 8);
       routeCache.current[driver.shiftRowId] = pts;
       setRoutes(prev => ({ ...prev, [driver.driverId]: pts }));
     }).catch(() => {});

@@ -20,12 +20,13 @@ import { writeGpsPoint } from './firebase';
 import { updateFacilityLeft } from './api';
 
 // AsyncStorage keys (local device state — not synced to any backend)
-const KEY_LAST_POS      = 'gps_last_position';     // { lat, lng, ts }
-const KEY_TOTAL_KM      = 'gps_total_km';           // accumulated km (string)
-const KEY_FACILITY_LEFT = 'gps_facility_left_time'; // ISO string
-const KEY_SHIFT_ACTIVE  = 'gps_shift_active';       // 'true' | 'false'
-const KEY_GPS_USER      = 'gps_tracking_user';      // JSON { userId, userName }
-const KEY_SHIFT_ROW_ID  = 'gps_shift_row_id';       // GAS attendance row ID
+const KEY_LAST_POS       = 'gps_last_position';      // { lat, lng, ts }
+const KEY_LAST_ROUTE_POS = 'gps_last_route_pos';     // { lat, lng } — last point pushed to Firebase route
+const KEY_TOTAL_KM       = 'gps_total_km';           // accumulated km (string)
+const KEY_FACILITY_LEFT  = 'gps_facility_left_time'; // ISO string
+const KEY_SHIFT_ACTIVE   = 'gps_shift_active';       // 'true' | 'false'
+const KEY_GPS_USER       = 'gps_tracking_user';      // JSON { userId, userName }
+const KEY_SHIFT_ROW_ID   = 'gps_shift_row_id';       // GAS attendance row ID
 
 export const BACKGROUND_LOCATION_TASK = 'RSA_BACKGROUND_LOCATION';
 
@@ -54,19 +55,21 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
       // In-car GPS with BestForNavigation typically reads 5-40m.
       if (accuracy !== null && accuracy > 40) continue;
 
-      // --- KM accumulation (local AsyncStorage) ---
+      // --- KM accumulation + movement detection ---
       const lastPosStr = await AsyncStorage.getItem(KEY_LAST_POS);
+      let isMoving = false;
+      let metresFromLast = 0;
       if (lastPosStr) {
         try {
           const lastPos    = JSON.parse(lastPosStr);
-          const metres     = distanceMetres(lastPos.lat, lastPos.lng, newLat, newLng);
+          metresFromLast   = distanceMetres(lastPos.lat, lastPos.lng, newLat, newLng);
           const speedKnown = speed !== null && speed >= 0;
-          const isMoving   = speedKnown ? speed >= 1.0 : metres > 30;
+          isMoving         = speedKnown ? speed >= 1.0 : metresFromLast > 30;
 
-          if (isMoving && metres > 15) {
+          if (isMoving && metresFromLast > 15) {
             const totalKmStr = await AsyncStorage.getItem(KEY_TOTAL_KM);
             const totalKm    = totalKmStr ? parseFloat(totalKmStr) : 0;
-            await AsyncStorage.setItem(KEY_TOTAL_KM, String(totalKm + metres / 1000));
+            await AsyncStorage.setItem(KEY_TOTAL_KM, String(totalKm + metresFromLast / 1000));
           }
           if (isMoving) {
             await AsyncStorage.setItem(KEY_LAST_POS, JSON.stringify({ lat: newLat, lng: newLng, ts: now }));
@@ -79,23 +82,44 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
       }
 
       // --- Write GPS point to Firebase RTDB ---
-      // The SDK queues this in native SQLite if offline; syncs automatically on reconnect.
-      // No await, no catch — fire-and-forget is safe because the SDK owns delivery.
+      // Live position (gps/live) updates every cycle so admin map marker stays current.
+      // Route point (gps/routes) only appended when driver is genuinely moving AND
+      // has travelled >30m from the last stored route point — prevents stationary
+      // GPS jitter from polluting the polyline with zigzag scribbles near the facility.
       try {
-        const totalKmStr = await AsyncStorage.getItem(KEY_TOTAL_KM);
-        const totalKm    = totalKmStr ? parseFloat(totalKmStr) : 0;
-        const userStr    = await AsyncStorage.getItem(KEY_GPS_USER);
-        const shiftRowId = await AsyncStorage.getItem(KEY_SHIFT_ROW_ID);
+        const totalKmStr    = await AsyncStorage.getItem(KEY_TOTAL_KM);
+        const totalKm       = totalKmStr ? parseFloat(totalKmStr) : 0;
+        const userStr       = await AsyncStorage.getItem(KEY_GPS_USER);
+        const shiftRowId    = await AsyncStorage.getItem(KEY_SHIFT_ROW_ID);
         if (userStr) {
           const user = JSON.parse(userStr);
+
+          // Check distance from last route point (not last seen position)
+          let appendRoute = false;
+          if (isMoving) {
+            const lastRoutePosStr = await AsyncStorage.getItem(KEY_LAST_ROUTE_POS);
+            if (!lastRoutePosStr) {
+              appendRoute = true; // first route point for this shift
+            } else {
+              const lastRoutePos   = JSON.parse(lastRoutePosStr);
+              const metresFromRoute = distanceMetres(lastRoutePos.lat, lastRoutePos.lng, newLat, newLng);
+              appendRoute = metresFromRoute > 30;
+            }
+          }
+
+          if (appendRoute) {
+            await AsyncStorage.setItem(KEY_LAST_ROUTE_POS, JSON.stringify({ lat: newLat, lng: newLng }));
+          }
+
           writeGpsPoint({
-            driverId:   user.userId,
-            driverName: user.userName,
-            shiftRowId: shiftRowId || '',
-            lat:        newLat,
-            lng:        newLng,
-            km:         totalKm,
-            accuracy:   accuracy || 0,
+            driverId:    user.userId,
+            driverName:  user.userName,
+            shiftRowId:  shiftRowId || '',
+            lat:         newLat,
+            lng:         newLng,
+            km:          totalKm,
+            accuracy:    accuracy || 0,
+            appendRoute,
           });
         }
       } catch (_) {}
@@ -171,12 +195,13 @@ export async function checkFacilityGeofence() {
 export async function startShiftTracking(initialLat, initialLng, userId, userName, rowId) {
   try {
     await AsyncStorage.multiSet([
-      [KEY_LAST_POS,      JSON.stringify({ lat: initialLat || 0, lng: initialLng || 0, ts: new Date().toISOString() })],
-      [KEY_TOTAL_KM,      '0'],
-      [KEY_FACILITY_LEFT, ''],
-      [KEY_SHIFT_ACTIVE,  'true'],
-      [KEY_GPS_USER,      JSON.stringify({ userId: userId || '', userName: userName || '' })],
-      [KEY_SHIFT_ROW_ID,  String(rowId || '')],
+      [KEY_LAST_POS,       JSON.stringify({ lat: initialLat || 0, lng: initialLng || 0, ts: new Date().toISOString() })],
+      [KEY_LAST_ROUTE_POS, ''],
+      [KEY_TOTAL_KM,       '0'],
+      [KEY_FACILITY_LEFT,  ''],
+      [KEY_SHIFT_ACTIVE,   'true'],
+      [KEY_GPS_USER,       JSON.stringify({ userId: userId || '', userName: userName || '' })],
+      [KEY_SHIFT_ROW_ID,   String(rowId || '')],
     ]);
 
     // Always stop and restart so new config (accuracy, intervals) is applied.
@@ -232,7 +257,7 @@ export async function stopShiftTracking(userId) {
     const facilityLeftTime = (facilityLeftRaw && facilityLeftRaw !== '') ? facilityLeftRaw : null;
 
     await AsyncStorage.multiRemove([
-      KEY_LAST_POS, KEY_TOTAL_KM, KEY_FACILITY_LEFT,
+      KEY_LAST_POS, KEY_LAST_ROUTE_POS, KEY_TOTAL_KM, KEY_FACILITY_LEFT,
       KEY_SHIFT_ACTIVE, KEY_GPS_USER, KEY_SHIFT_ROW_ID,
     ]);
 
