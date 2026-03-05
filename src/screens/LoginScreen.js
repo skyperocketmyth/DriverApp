@@ -14,6 +14,7 @@ import * as IntentLauncher from 'expo-intent-launcher';
 import { useAppContext } from '../store/AppContext';
 import { checkFacilityGeofence, requestLocationPermissions, startShiftTracking } from '../services/gps';
 import { saveShiftStart, saveGpsPoint } from '../services/api';
+import { writeGpsPoint } from '../services/firebase';
 import { COLORS } from '../config';
 import { t, isRTL } from '../i18n/translations';
 
@@ -149,6 +150,19 @@ export default function Stage1ArrivalScreen({ navigation }) {
       } catch (gpsErr) {
         console.warn('GPS tracking start failed (non-fatal):', gpsErr);
       }
+
+      // Immediately write arrival position to Firebase so the admin map pin appears
+      // right away — background GPS task may take 15-30s to fire its first update.
+      writeGpsPoint({
+        driverId:    currentUser.userId,
+        driverName:  currentUser.userName,
+        shiftRowId:  result.rowId,
+        lat:         arrivalCoords.lat,
+        lng:         arrivalCoords.lng,
+        km:          0,
+        accuracy:    0,
+        appendRoute: true,
+      });
 
       // Request battery optimization exemption (Android) — keeps foreground GPS service alive
       if (Platform.OS === 'android') {
