@@ -106,13 +106,19 @@
   // Poll GAS every 60s to get the set of driver IDs with active (non-completed) shifts.
   // Map only shows pins whose driverId is in this set.
   async function syncValidDrivers() {
+    var statusEl = document.getElementById('status-text');
     try {
       var resp = await fetch(GAS_URL + '?action=getLiveOperations');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
       var data = await resp.json();
+      if (data.error) throw new Error(data.error);
       var ops  = (data.operations || []).filter(function(op) { return !op.hasCompleted; });
       validDriverIds = new Set(ops.map(function(op) { return String(op.driverId); }));
       renderMap();
-    } catch(_) { /* keep previous validDriverIds on GAS failure */ }
+    } catch(err) {
+      // Keep previous validDriverIds on failure so map doesn't blank out
+      if (statusEl) statusEl.textContent = 'GAS sync failed: ' + err.message;
+    }
   }
 
   function getDb() {

@@ -480,10 +480,12 @@ function MapTab({ liveOpsData }) {
   // Subscribe to Firebase live positions — fires on every driver position update
   useEffect(() => {
     const unsubscribe = subscribeToLivePositions(async (firebaseDrivers) => {
-      const ops = liveOpsData || [];
+      const ops = liveOpsData ?? null;
       // Only show drivers who have an active (non-completed) shift in GAS.
-      // Fall back to showing all Firebase drivers if GAS data hasn't loaded yet.
-      const active = ops.length > 0
+      // Fall back to showing all Firebase drivers only when liveOpsData hasn't
+      // loaded yet (null/undefined). An empty array means GAS loaded but no
+      // active shifts — correctly hides all phantom pins.
+      const active = ops != null
         ? firebaseDrivers.filter(d => {
             const op = ops.find(o => String(o.driverId) === String(d.driverId));
             return op && !op.hasCompleted;
@@ -491,7 +493,7 @@ function MapTab({ liveOpsData }) {
         : firebaseDrivers;
       // Enrich with vehicle + stage from GAS live ops (join on driverId)
       const enriched = active.map(d => {
-        const op = ops.find(o => String(o.driverId) === String(d.driverId));
+        const op = (ops ?? []).find(o => String(o.driverId) === String(d.driverId));
         return { ...d, vehicle: op?.vehicle || '', currentStage: op?.currentStage };
       });
       setDrivers(enriched);
