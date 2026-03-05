@@ -1427,8 +1427,6 @@ function getAdminHtml_() {
 '      mapFirstFitDone = false;\n' +
 '      if (window.google && window.google.maps) {\n' +
 '        if (!googleMap) initMap(); else loadMapData();\n' +
-'      } else {\n' +
-'        loadGoogleMapsScript();\n' +
 '      }\n' +
 '    } else {\n' +
 '      stopMapSubscription();\n' +
@@ -1652,6 +1650,7 @@ function getAdminHtml_() {
 '\n' +
 '  function initMap() {\n' +
 '    mapApiLoading = false;\n' +
+'    if (!document.getElementById(\'panel-7\').classList.contains(\'active\')) return;\n' +
 '    googleMap = new google.maps.Map(document.getElementById("map-container"), {\n' +
 '      zoom: 11,\n' +
 '      center: { lat: FACILITY_LAT, lng: FACILITY_LNG },\n' +
@@ -1834,6 +1833,7 @@ function getAdminHtml_() {
 '  document.getElementById("l-pw").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });\n' +
 '  document.getElementById("l-uid").addEventListener("keydown", function(e) { if (e.key === "Enter") doLogin(); });\n' +
 '</script>\n' +
+'<script async src="https://maps.googleapis.com/maps/api/js?callback=initMap&key=' + GOOGLE_MAPS_API_KEY + '"></script>\n' +
 '</body>\n' +
 '</html>';
 }
