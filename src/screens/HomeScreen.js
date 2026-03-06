@@ -65,6 +65,8 @@ export default function HomeScreen({ navigation }) {
   const rtl = isRTL(language);
 
   const [liveKm, setLiveKm] = useState(0);
+  const [gpsHealthy, setGpsHealthy] = useState(true);
+  const gpsAlertShown = React.useRef(false);
   const lastFgPos = React.useRef(null); // last foreground GPS position written
 
   // Refresh GPS km + push foreground GPS heartbeat every 10 seconds while shift is active.
@@ -89,6 +91,18 @@ export default function HomeScreen({ navigation }) {
     try {
       const stats = await getLiveGpsStats();
       setLiveKm(stats.totalKm || 0);
+
+      // Track GPS health based on last position age
+      if (stats.lastPosition?.ts) {
+        const age = Math.round((Date.now() - new Date(stats.lastPosition.ts).getTime()) / 1000);
+        const healthy = age < 60;
+        setGpsHealthy(healthy);
+        if (!healthy && !gpsAlertShown.current) {
+          gpsAlertShown.current = true;
+          Alert.alert('GPS Signal Lost', 'GPS tracking appears to have stopped. Please check that location services are enabled.');
+        }
+        if (healthy) gpsAlertShown.current = false;
+      }
 
       // Foreground GPS heartbeat: get current position and write to Firebase as a route point
       // if the driver has moved >10m from the last foreground-written point.
@@ -320,8 +334,10 @@ export default function HomeScreen({ navigation }) {
         {shiftActive && (
           <View style={styles.kmBanner}>
             <View style={styles.kmBannerLeft}>
-              <View style={styles.gpsDot} />
-              <Text style={styles.kmBannerTitle}>GPS Tracking Active</Text>
+              <View style={[styles.gpsDot, !gpsHealthy && styles.gpsDotStale]} />
+              <Text style={styles.kmBannerTitle}>
+                {gpsHealthy ? 'GPS Tracking Active' : 'GPS Signal Lost'}
+              </Text>
             </View>
             <View style={styles.kmValueBox}>
               <Text style={styles.kmValue}>{liveKm.toFixed(2)}</Text>
@@ -456,6 +472,7 @@ const styles = StyleSheet.create({
   },
   kmBannerLeft:  { flexDirection: 'row', alignItems: 'center', gap: 10 },
   gpsDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: '#4CAF50' },
+  gpsDotStale: { backgroundColor: '#F44336' },
   kmBannerTitle: { color: COLORS.white, fontWeight: '700', fontSize: 14 },
   kmValueBox:    { alignItems: 'flex-end' },
   kmValue:       { fontSize: 28, fontWeight: '900', color: COLORS.white },

@@ -12,7 +12,7 @@ import {
 } from 'react-native';
 import * as IntentLauncher from 'expo-intent-launcher';
 import { useAppContext } from '../store/AppContext';
-import { checkFacilityGeofence, requestLocationPermissions, startShiftTracking } from '../services/gps';
+import { checkFacilityGeofence, requestLocationPermissions, startShiftTracking, getLiveGpsStats } from '../services/gps';
 import { saveShiftStart } from '../services/api';
 import { writeGpsPoint } from '../services/firebase';
 import { COLORS } from '../config';
@@ -138,6 +138,24 @@ export default function Stage1ArrivalScreen({ navigation }) {
       } catch (gpsErr) {
         console.warn('GPS tracking start failed (non-fatal):', gpsErr);
       }
+
+      // Fire-and-forget: verify GPS is producing updates within 12s
+      (async () => {
+        try {
+          for (let i = 0; i < 4; i++) {
+            await new Promise(r => setTimeout(r, 3000));
+            const stats = await getLiveGpsStats();
+            if (stats.lastPosition?.ts) {
+              const age = (Date.now() - new Date(stats.lastPosition.ts).getTime()) / 1000;
+              if (age < 15) return; // GPS is working
+            }
+          }
+          Alert.alert(
+            'GPS Check',
+            'GPS tracking may not be active. Please ensure location services are enabled and set to "Allow all the time".',
+          );
+        } catch (_) {}
+      })();
 
       // Immediately write arrival position to Firebase so the admin map pin appears
       // right away — background GPS task may take 15-30s to fire its first update.

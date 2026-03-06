@@ -18,7 +18,8 @@ import { createStackNavigator } from '@react-navigation/stack';
 
 // Import GPS service early so TaskManager.defineTask is registered at launch
 import './src/services/gps';
-import { writeGpsPoint } from './src/services/firebase';
+import { getBackgroundTaskHealth } from './src/services/gps';
+import { writeGpsPoint, writeTaskHealthEvent } from './src/services/firebase';
 import { distanceMetres } from './src/utils/haversine';
 
 import { AppProvider } from './src/store/AppContext';
@@ -101,6 +102,18 @@ function ForegroundGpsHeartbeat() {
         try {
           const active = await AsyncStorage.getItem('gps_shift_active');
           if (active !== 'true') return;
+
+          // Detect if background task has stalled (OS killed it)
+          try {
+            const health = await getBackgroundTaskHealth();
+            if (health.status === 'stalled') {
+              const userStr = await AsyncStorage.getItem('gps_tracking_user');
+              if (userStr) {
+                const user = JSON.parse(userStr);
+                writeTaskHealthEvent(user.userId, health);
+              }
+            }
+          } catch (_) {}
 
           const pos = await Location.getCurrentPositionAsync({
             accuracy: Location.Accuracy.High,

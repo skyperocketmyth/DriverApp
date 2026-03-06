@@ -264,15 +264,15 @@ function escHtml(s) {
 // =============================================================================
 // GOOGLE ROADS API — SNAP TO ROADS
 // Sends GPS points to Roads API with interpolate=true for gap filling.
-// Chunks into batches of 90 (API limit 100) with 5-point overlap.
+// Chunks into batches of 80 (API limit 100) with 10-point overlap.
 // Returns array of segments (arrays of LatLng) for gap-aware rendering.
 // =============================================================================
 function snapToRoads(points, retryCount) {
   retryCount = retryCount || 0;
   if (points.length < 2) return Promise.resolve({ segments: [points.map(function(p){ return {lat: p.lat, lng: p.lng}; })] });
 
-  // Chunk into batches of 90 with 5-point overlap
-  var BATCH = 90, OVERLAP = 5;
+  // Chunk into batches of 80 with 10-point overlap for better continuity
+  var BATCH = 80, OVERLAP = 10;
   var batches = [];
   for (var i = 0; i < points.length; i += BATCH - OVERLAP) {
     batches.push(points.slice(i, i + BATCH));
@@ -368,6 +368,27 @@ function scheduleRouteRedraw(driverId) {
   ds.snapTimer = setTimeout(function(){ redrawRoute(driverId); }, 3000);
 }
 
+// Interpolate linearly between sparse GPS points (gap 50m–5km) to improve Roads API snapping
+function interpolateSparsePoints(points, maxGapM) {
+  if (points.length < 2) return points;
+  var out = [points[0]];
+  for (var i = 1; i < points.length; i++) {
+    var gap = haversineM(points[i - 1], points[i]);
+    if (gap > maxGapM && gap < 5000) {
+      var steps = Math.ceil(gap / 30); // ~30m spacing
+      for (var s = 1; s < steps; s++) {
+        var frac = s / steps;
+        out.push({
+          lat: points[i - 1].lat + (points[i].lat - points[i - 1].lat) * frac,
+          lng: points[i - 1].lng + (points[i].lng - points[i - 1].lng) * frac,
+        });
+      }
+    }
+    out.push(points[i]);
+  }
+  return out;
+}
+
 // Filter teleport jumps >5km (GPS cold-start / signal loss) — aligned with APK pipeline
 function filterTeleports(points) {
   if (points.length < 2) return points;
@@ -385,8 +406,9 @@ function redrawRoute(driverId) {
   // Remove old polylines
   clearPolylines(ds);
 
-  // Filter teleport jumps before snapping (aligned with APK)
+  // Filter teleport jumps, then interpolate sparse gaps before snapping
   var filtered = filterTeleports(ds.routePoints);
+  filtered = interpolateSparsePoints(filtered, 50);
   if (filtered.length < 2) return;
 
   // Call Google Roads API for road-snapped polyline

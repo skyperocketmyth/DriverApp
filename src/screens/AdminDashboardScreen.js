@@ -56,19 +56,40 @@ function haversineM(a, b) {
   return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
 }
 
+// Interpolate linearly between sparse GPS points (gap 50m–5km) to improve Roads API snapping
+function interpolateSparsePoints(points, maxGapM) {
+  if (points.length < 2) return points;
+  const out = [points[0]];
+  for (let i = 1; i < points.length; i++) {
+    const gap = haversineM(points[i - 1], points[i]);
+    if (gap > maxGapM && gap < 5000) {
+      const steps = Math.ceil(gap / 30); // ~30m spacing
+      for (let s = 1; s < steps; s++) {
+        const frac = s / steps;
+        out.push({
+          latitude: points[i - 1].latitude + (points[i].latitude - points[i - 1].latitude) * frac,
+          longitude: points[i - 1].longitude + (points[i].longitude - points[i - 1].longitude) * frac,
+        });
+      }
+    }
+    out.push(points[i]);
+  }
+  return out;
+}
+
 // Google Roads API — snaps GPS traces to actual roads with interpolation.
-// Sends ALL filtered points (no downsampling) in 90-point batches with 5-point overlap.
+// Sends ALL filtered points (no downsampling) in 80-point batches with 10-point overlap.
 // Returns { segments: [[{latitude, longitude}]] } for gap-aware multi-segment rendering.
 // On failure, falls back to raw filtered polyline.
 async function snapRouteToRoads(points) {
   if (!points || points.length < 2) return points || [];
-  const cleaned = filterRouteOutliers(points);
+  const cleaned = interpolateSparsePoints(filterRouteOutliers(points), 50);
   if (cleaned.length < 2) return { segments: [cleaned] };
 
   try {
-    // Chunk ALL cleaned points into batches of 90 with 5-point overlap
-    const BATCH = 90;
-    const OVERLAP = 5;
+    // Chunk ALL cleaned points into batches of 80 with 10-point overlap
+    const BATCH = 80;
+    const OVERLAP = 10;
     const batches = [];
     for (let i = 0; i < cleaned.length; i += BATCH - OVERLAP) {
       batches.push(cleaned.slice(i, i + BATCH));

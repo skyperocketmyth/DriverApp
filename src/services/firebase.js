@@ -117,3 +117,24 @@ export async function fetchShiftRoute(shiftRowId) {
 export function clearLivePosition(driverId) {
   database().ref(`${RTDB_LIVE}/${driverId}`).remove().catch(() => {});
 }
+
+// =============================================================================
+// WRITE TASK HEALTH EVENT — admin can monitor background task health per driver
+// =============================================================================
+export function writeTaskHealthEvent(driverId, event) {
+  if (!driverId) return;
+  database().ref(`gps/health/${driverId}`).set({
+    driverId,
+    status: event.status || 'unknown',
+    gapSeconds: event.gapSeconds || null,
+    ts: new Date().toISOString(),
+  }).catch(() => {});
+}
+
+// =============================================================================
+// DELETE SHIFT ROUTE — cleanup completed shift route data from Firebase
+// =============================================================================
+export function deleteShiftRoute(shiftRowId) {
+  if (!shiftRowId) return;
+  database().ref(`${RTDB_ROUTES}/${shiftRowId}`).remove().catch(() => {});
+}

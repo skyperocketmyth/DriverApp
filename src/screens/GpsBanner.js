@@ -8,12 +8,12 @@ import { COLORS } from '../config';
 import { t } from '../i18n/translations';
 
 export default function GpsBanner({ language }) {
-  const [stats, setStats] = useState({ totalKm: 0, facilityLeftTime: null });
+  const [stats, setStats] = useState({ totalKm: 0, facilityLeftTime: null, lastPosition: null });
 
   useEffect(() => {
     let interval;
     loadStats();
-    interval = setInterval(loadStats, 15000); // refresh every 15s
+    interval = setInterval(loadStats, 10000); // refresh every 10s
     return () => clearInterval(interval);
   }, []);
 
@@ -21,6 +21,11 @@ export default function GpsBanner({ language }) {
     const s = await getLiveGpsStats();
     setStats(s);
   }
+
+  const lastUpdateAge = stats.lastPosition?.ts
+    ? Math.round((Date.now() - new Date(stats.lastPosition.ts).getTime()) / 1000)
+    : null;
+  const gpsHealthy = lastUpdateAge !== null && lastUpdateAge < 60;
 
   function formatTime(isoStr) {
     if (!isoStr) return '';
@@ -32,8 +37,15 @@ export default function GpsBanner({ language }) {
   return (
     <View style={styles.banner}>
       <View style={styles.row}>
-        <View style={styles.dot} />
-        <Text style={styles.title}>{t('gpsTracking', language)}</Text>
+        <View style={[styles.dot, !gpsHealthy && styles.dotStale]} />
+        <Text style={styles.title}>
+          {gpsHealthy ? t('gpsTracking', language) : 'GPS Signal Lost'}
+        </Text>
+        {lastUpdateAge !== null && lastUpdateAge >= 30 && (
+          <Text style={styles.ageText}>
+            {lastUpdateAge < 60 ? `${lastUpdateAge}s ago` : `${Math.round(lastUpdateAge / 60)}m ago`}
+          </Text>
+        )}
       </View>
       <View style={styles.stats}>
         <View style={styles.stat}>
@@ -78,7 +90,11 @@ const styles = StyleSheet.create({
     backgroundColor: '#4CAF50',
     marginRight: 8,
   },
+  dotStale: {
+    backgroundColor: '#F44336',
+  },
   title: { color: COLORS.white, fontSize: 13, fontWeight: '700', letterSpacing: 0.5 },
+  ageText: { color: 'rgba(255,255,255,0.5)', fontSize: 11, marginLeft: 8 },
   stats: { flexDirection: 'row', alignItems: 'center' },
   stat:  { flex: 1, alignItems: 'center' },
   divider: { width: 1, height: 32, backgroundColor: 'rgba(255,255,255,0.2)' },

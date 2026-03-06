@@ -28,6 +28,8 @@ const KEY_SHIFT_ACTIVE     = 'gps_shift_active';       // 'true' | 'false'
 const KEY_GPS_USER         = 'gps_tracking_user';      // JSON { userId, userName }
 const KEY_SHIFT_ROW_ID     = 'gps_shift_row_id';       // GAS attendance row ID
 const KEY_DEPARTURE_ARMED  = 'gps_departure_armed';    // 'true' after Stage 2 submit
+const KEY_LAST_BG_TICK     = 'gps_last_bg_tick';       // timestamp of last background task invocation
+const KEY_ROUTE_POINT_COUNT = 'gps_route_point_count'; // number of route points appended this shift
 
 export const BACKGROUND_LOCATION_TASK = 'RSA_BACKGROUND_LOCATION';
 
@@ -46,12 +48,16 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
     const keys = [
       KEY_SHIFT_ACTIVE, KEY_LAST_POS, KEY_TOTAL_KM, KEY_GPS_USER,
       KEY_SHIFT_ROW_ID, KEY_LAST_ROUTE_POS, KEY_DEPARTURE_ARMED, KEY_FACILITY_LEFT,
+      KEY_ROUTE_POINT_COUNT,
     ];
     const pairs = await AsyncStorage.multiGet(keys);
     const state = {};
     for (const [k, v] of pairs) state[k] = v;
 
     if (state[KEY_SHIFT_ACTIVE] !== 'true') return;
+
+    // Stamp every background task invocation for health monitoring
+    await AsyncStorage.setItem(KEY_LAST_BG_TICK, String(Date.now()));
 
     let totalKm       = state[KEY_TOTAL_KM] ? parseFloat(state[KEY_TOTAL_KM]) : 0;
     let lastPos       = state[KEY_LAST_POS] ? JSON.parse(state[KEY_LAST_POS]) : null;
@@ -60,6 +66,7 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
     const shiftRowId  = state[KEY_SHIFT_ROW_ID] || '';
     const departArmed = state[KEY_DEPARTURE_ARMED] === 'true';
     let facilityLeft  = state[KEY_FACILITY_LEFT] || '';
+    let routePointCount = state[KEY_ROUTE_POINT_COUNT] ? parseInt(state[KEY_ROUTE_POINT_COUNT], 10) : 0;
 
     // Track which keys need writing back
     const writes = {};
@@ -112,9 +119,15 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
             appendRoute = distanceMetres(lastRoutePos.lat, lastRoutePos.lng, newLat, newLng) > 10;
           }
         }
+        // Cap route points at 10,000 to prevent unbounded growth on stuck/forgotten shifts
+        if (appendRoute && routePointCount >= 10000) {
+          appendRoute = false;
+        }
         if (appendRoute) {
           lastRoutePos = { lat: newLat, lng: newLng };
           writes[KEY_LAST_ROUTE_POS] = JSON.stringify(lastRoutePos);
+          routePointCount += 1;
+          writes[KEY_ROUTE_POINT_COUNT] = String(routePointCount);
         }
 
         writeGpsPoint({
@@ -221,11 +234,13 @@ export async function startShiftTracking(initialLat, initialLng, userId, userNam
       [KEY_GPS_USER,        JSON.stringify({ userId: userId || '', userName: userName || '' })],
       [KEY_SHIFT_ROW_ID,    String(rowId || '')],
       [KEY_DEPARTURE_ARMED, 'false'],  // armed only after Stage 2 submit
+      [KEY_LAST_BG_TICK,    String(Date.now())],
+      [KEY_ROUTE_POINT_COUNT, '0'],
     ]);
 
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
       accuracy:          Location.Accuracy.BestForNavigation,
-      distanceInterval:  10,       // minimum 10m between updates
+      distanceInterval:  5,        // minimum 5m between updates (captures turns better)
       timeInterval:      10000,    // every 10s (was 5s — less aggressive, more reliable in background)
       deferredUpdatesInterval: 0,  // prevent OS from batching/deferring updates
       deferredUpdatesDistance: 0,  // prevent OS from batching/deferring updates
@@ -269,13 +284,25 @@ export async function stopShiftTracking(userId) {
 
     const totalKmStr      = await AsyncStorage.getItem(KEY_TOTAL_KM);
     const facilityLeftRaw = await AsyncStorage.getItem(KEY_FACILITY_LEFT);
+    const shiftRowId      = await AsyncStorage.getItem(KEY_SHIFT_ROW_ID);
     const totalKm         = totalKmStr ? Math.round(parseFloat(totalKmStr) * 100) / 100 : 0;
     const facilityLeftTime = (facilityLeftRaw && facilityLeftRaw !== '') ? facilityLeftRaw : null;
 
     await AsyncStorage.multiRemove([
       KEY_LAST_POS, KEY_LAST_ROUTE_POS, KEY_TOTAL_KM, KEY_FACILITY_LEFT,
       KEY_SHIFT_ACTIVE, KEY_GPS_USER, KEY_SHIFT_ROW_ID, KEY_DEPARTURE_ARMED,
+      KEY_LAST_BG_TICK, KEY_ROUTE_POINT_COUNT,
     ]);
+
+    // Schedule route data deletion from Firebase after 5 minutes (gives admin map time to display)
+    if (shiftRowId) {
+      setTimeout(() => {
+        try {
+          const { deleteShiftRoute } = require('./firebase');
+          deleteShiftRoute(shiftRowId);
+        } catch (_) {}
+      }, 5 * 60 * 1000);
+    }
 
     return { totalKm, facilityLeftTime };
   } catch (err) {
@@ -299,6 +326,21 @@ export async function getLiveGpsStats() {
     };
   } catch (_) {
     return { totalKm: 0, facilityLeftTime: null, lastPosition: null };
+  }
+}
+
+// =============================================================================
+// GET BACKGROUND TASK HEALTH — detects if OS killed the background task
+// =============================================================================
+export async function getBackgroundTaskHealth() {
+  try {
+    const [active, tick] = await AsyncStorage.multiGet([KEY_SHIFT_ACTIVE, KEY_LAST_BG_TICK]);
+    if (active[1] !== 'true') return { status: 'inactive', gapSeconds: null };
+    if (!tick[1]) return { status: 'no_data', gapSeconds: null };
+    const gapSeconds = Math.round((Date.now() - parseInt(tick[1], 10)) / 1000);
+    return { status: gapSeconds > 90 ? 'stalled' : 'healthy', gapSeconds };
+  } catch (_) {
+    return { status: 'no_data', gapSeconds: null };
   }
 }
 
