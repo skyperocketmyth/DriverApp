@@ -533,6 +533,7 @@ function MapTab({ liveOpsData }) {
 
   const ROUTE_REFRESH_MS = 30000;   // re-fetch active routes every 30s
   const driverFirstSeen = useRef({}); // grace period tracking for new drivers
+  const initialLoadDone = useRef(false); // true after first Firebase callback
 
   function getColor(driverId) {
     if (!colorMap.current[driverId]) {
@@ -555,17 +556,19 @@ function MapTab({ liveOpsData }) {
       firebaseDrivers.forEach(d => {
         if (!driverFirstSeen.current[d.driverId]) driverFirstSeen.current[d.driverId] = now;
       });
-      // Only filter against GAS once driver has been visible for >90s.
-      // This ensures a new driver's pin appears immediately after Stage 1,
-      // even before the admin dashboard has refreshed GAS data.
+      // Cross-validate against GAS. During initial load, enforce GAS check
+      // immediately (no grace period) to prevent ghost drivers. After initial
+      // load, new drivers get a 90s grace period so they appear right after
+      // Stage 1 even before the next GAS poll.
       const active = ops != null
         ? firebaseDrivers.filter(d => {
             const age = now - (driverFirstSeen.current[d.driverId] || 0);
-            if (age < 90000) return true; // grace period — show without GAS check
+            if (initialLoadDone.current && age < 90000) return true; // grace period for new drivers only
             const op = ops.find(o => String(o.driverId) === String(d.driverId));
             return op && !op.hasCompleted;
           })
         : firebaseDrivers;
+      initialLoadDone.current = true;
       // Enrich with vehicle + stage from GAS live ops (join on driverId)
       const enriched = active.map(d => {
         const op = (ops ?? []).find(o => String(o.driverId) === String(d.driverId));
