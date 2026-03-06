@@ -13,7 +13,7 @@ import { BarChart, LineChart } from 'react-native-chart-kit';
 import { fetchAdminDashboard, fetchLiveOperations } from '../services/api';
 import { subscribeToLivePositions, fetchShiftRoute } from '../services/firebase';
 import MapView, { Marker, Polyline, Callout } from 'react-native-maps';
-import { FACILITY } from '../config';
+import { FACILITY, GOOGLE_MAPS_API_KEY } from '../config';
 import { COLORS } from '../config';
 
 const SCREEN_W = Dimensions.get('window').width;
@@ -89,46 +89,97 @@ function downsampleForSnap(points, maxPoints = 100) {
   return out;
 }
 
-// OSRM map-matching — snaps GPS traces to actual roads driven.
-// Uses /match (not /route) so the result follows the recorded trace,
-// not the theoretically fastest route between waypoints.
-// Falls back to the original points if the service is unavailable.
+// Haversine distance between two {latitude, longitude} points (metres)
+function haversineM(a, b) {
+  const R = 6371000;
+  const dLat = (b.latitude - a.latitude) * Math.PI / 180;
+  const dLng = (b.longitude - a.longitude) * Math.PI / 180;
+  const x = Math.sin(dLat / 2) ** 2
+    + Math.cos(a.latitude * Math.PI / 180) * Math.cos(b.latitude * Math.PI / 180)
+    * Math.sin(dLng / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1 - x));
+}
+
+// Google Roads API — snaps GPS traces to actual roads with interpolation.
+// `interpolate=true` fills gaps between sparse GPS points with road-following coords.
+// Chunks into batches of 90 (API limit 100) with 5-point overlap for continuity.
+// Returns { segments: [[{latitude, longitude}]] } for gap-aware multi-segment rendering.
 async function snapRouteToRoads(points) {
   if (!points || points.length < 2) return points || [];
   try {
     const cleaned = filterRouteOutliers(points);
     const simplified = rdpSimplify(cleaned, 15);
-    const pts = downsampleForSnap(simplified);
-    if (pts.length < 2) return simplified;
+    if (simplified.length < 2) return simplified;
 
-    const coords = pts
-      .map(p => `${p.longitude},${p.latitude}`)
-      .join(';');
-
-    // /match API: map-matches GPS trace to road network.
-    // radiuses=25 tells OSRM each point is accurate to ~25m.
-    const radiuses = pts.map(() => '25').join(';');
-    const url = `https://router.project-osrm.org/match/v1/driving/${coords}?overview=full&geometries=geojson&radiuses=${radiuses}`;
-    const resp = await fetch(url);
-    if (!resp.ok) return simplified;
-    const data = await resp.json();
-    if (!data.matchings || !data.matchings[0] || !data.matchings[0].geometry || !data.matchings[0].geometry.coordinates) {
-      return simplified;
+    // Chunk into batches of 90 with 5-point overlap
+    const BATCH = 90;
+    const OVERLAP = 5;
+    const batches = [];
+    for (let i = 0; i < simplified.length; i += BATCH - OVERLAP) {
+      batches.push(simplified.slice(i, i + BATCH));
+      if (i + BATCH >= simplified.length) break;
     }
 
-    // Concatenate all matchings (OSRM may split into segments if gaps are too large)
-    const allCoords = [];
-    for (const matching of data.matchings) {
-      if (matching.geometry && matching.geometry.coordinates) {
-        for (const [lng, lat] of matching.geometry.coordinates) {
-          allCoords.push({ latitude: lat, longitude: lng });
-        }
+    let allSnapped = [];
+    for (const batch of batches) {
+      const path = batch.map(p => `${p.latitude},${p.longitude}`).join('|');
+      const url = `https://roads.googleapis.com/v1/snapToRoads?path=${path}&interpolate=true&key=${GOOGLE_MAPS_API_KEY}`;
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error('Roads API HTTP ' + resp.status);
+      const data = await resp.json();
+      if (!data.snappedPoints || data.snappedPoints.length === 0) throw new Error('No snapped points');
+
+      const batchCoords = data.snappedPoints.map(sp => ({
+        latitude: sp.location.latitude,
+        longitude: sp.location.longitude,
+      }));
+
+      // Skip overlap region from previous batch to avoid duplicates
+      if (allSnapped.length > 0 && batchCoords.length > OVERLAP) {
+        allSnapped = allSnapped.concat(batchCoords.slice(OVERLAP));
+      } else {
+        allSnapped = allSnapped.concat(batchCoords);
       }
     }
 
-    return allCoords.length >= 2 ? allCoords : simplified;
+    if (allSnapped.length < 2) return simplified;
+
+    // Split into segments at gaps > 500m to prevent straight-line artifacts
+    const GAP_M = 500;
+    const segments = [];
+    let seg = [allSnapped[0]];
+    for (let i = 1; i < allSnapped.length; i++) {
+      if (haversineM(allSnapped[i - 1], allSnapped[i]) > GAP_M) {
+        if (seg.length >= 2) segments.push(seg);
+        seg = [allSnapped[i]];
+      } else {
+        seg.push(allSnapped[i]);
+      }
+    }
+    if (seg.length >= 2) segments.push(seg);
+
+    return { segments: segments.length > 0 ? segments : [allSnapped] };
   } catch {
-    return points;
+    // Retry once
+    try {
+      const cleaned = filterRouteOutliers(points);
+      const simplified = rdpSimplify(cleaned, 15);
+      const pts = downsampleForSnap(simplified);
+      if (pts.length < 2) return simplified;
+      const path = pts.map(p => `${p.latitude},${p.longitude}`).join('|');
+      const url = `https://roads.googleapis.com/v1/snapToRoads?path=${path}&interpolate=true&key=${GOOGLE_MAPS_API_KEY}`;
+      const resp = await fetch(url);
+      if (!resp.ok) return simplified;
+      const data = await resp.json();
+      if (!data.snappedPoints || data.snappedPoints.length < 2) return simplified;
+      const coords = data.snappedPoints.map(sp => ({
+        latitude: sp.location.latitude,
+        longitude: sp.location.longitude,
+      }));
+      return { segments: [coords] };
+    } catch {
+      return points;
+    }
   }
 }
 
@@ -471,7 +522,7 @@ function HelpersTab({ data }) {
 // Routes fetched on-demand from Firebase when a driver is selected.
 function MapTab({ liveOpsData }) {
   const [drivers,    setDrivers]    = useState([]);
-  const [routes,     setRoutes]     = useState({});  // { driverId: [{latitude, longitude}] }
+  const [routes,     setRoutes]     = useState({});  // { driverId: { segments: [[{latitude, longitude}]] } | [{latitude, longitude}] }
   const [selectedId, setSelectedId] = useState(null);
   const [loading,    setLoading]    = useState(true);
   const [lastUpdate, setLastUpdate] = useState(null);
@@ -575,13 +626,29 @@ function MapTab({ liveOpsData }) {
     }).catch(() => {});
   }, [selectedId]);
 
+  // Extract flat coordinate array from route data (handles both { segments } and flat array)
+  function flattenRoute(routeData) {
+    if (!routeData) return [];
+    if (routeData.segments) return routeData.segments.flat();
+    if (Array.isArray(routeData)) return routeData;
+    return [];
+  }
+
+  // Extract segments array from route data (handles both formats)
+  function getSegments(routeData) {
+    if (!routeData) return [];
+    if (routeData.segments) return routeData.segments;
+    if (Array.isArray(routeData) && routeData.length >= 2) return [routeData];
+    return [];
+  }
+
   function fitMap(driverList, routeMap, focusId) {
     if (!mapRef.current) return;
     const list = focusId ? driverList.filter(d => d.driverId === focusId) : driverList;
     const coords = [{ latitude: FACILITY.lat, longitude: FACILITY.lng }];
     list.forEach(d => {
       if (d.lat && d.lng) coords.push({ latitude: d.lat, longitude: d.lng });
-      (routeMap[d.driverId] || []).forEach(p => coords.push(p));
+      flattenRoute(routeMap[d.driverId]).forEach(p => coords.push(p));
     });
     try {
       mapRef.current.fitToCoordinates(coords, {
@@ -660,18 +727,20 @@ function MapTab({ liveOpsData }) {
           </Callout>
         </Marker>
 
-        {/* Route polyline per driver */}
+        {/* Route polylines per driver — multi-segment to avoid straight-line artifacts */}
         {displayDrivers.map(d => {
-          const pts = routes[d.driverId] || [];
-          if (pts.length < 2) return null;
-          return (
-            <Polyline
-              key={`route-${d.driverId}`}
-              coordinates={pts}
-              strokeColor={getColor(d.driverId)}
-              strokeWidth={4}
-            />
-          );
+          const segs = getSegments(routes[d.driverId]);
+          if (segs.length === 0) return null;
+          return segs.map((seg, idx) => (
+            seg.length >= 2 ? (
+              <Polyline
+                key={`route-${d.driverId}-${idx}`}
+                coordinates={seg}
+                strokeColor={getColor(d.driverId)}
+                strokeWidth={4}
+              />
+            ) : null
+          ));
         })}
 
         {/* Live position marker per driver */}

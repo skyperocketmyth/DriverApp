@@ -17,6 +17,9 @@ export const FACILITY = {
   departureMetres: 500,  // auto-capture departure time when driver leaves beyond this radius
 };
 
+// Google Maps API key (Roads API + Maps JavaScript API)
+export const GOOGLE_MAPS_API_KEY = 'AIzaSyCEO-OiBPuSJ8iGZuR8nXIJ9tGL-uVby1c';
+
 // App theme colours (matching original PWA)
 export const COLORS = {
   primary:    '#0D47A1',

@@ -110,7 +110,7 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
             } else {
               const lastRoutePos   = JSON.parse(lastRoutePosStr);
               const metresFromRoute = distanceMetres(lastRoutePos.lat, lastRoutePos.lng, newLat, newLng);
-              appendRoute = metresFromRoute > 15;
+              appendRoute = metresFromRoute > 10;
             }
           }
 

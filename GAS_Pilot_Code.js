@@ -11,6 +11,12 @@
 const SPREADSHEET_ID   = '1VB3K9JCUCdiGEbALxKpuWcJKaQ-H0S5b3JRK21l1fCE';
 const DRIVE_FOLDER_ID  = '1ZG9GX9ohs3n3tVVQVMvFf9xfPlByTwwE';
 
+// Firebase RTDB cleanup (used when deleting shifts)
+// Fill these with your RTDB URL and a database secret / auth token that
+// has permission to delete gps/live and gps/routes nodes.
+const FIREBASE_DB_URL   = 'https://warehouse-stock-take-default-rtdb.firebaseio.com';
+const FIREBASE_DB_TOKEN = 'mWu5qQU49Pk3ZJN4unFkjexdJPXQJJYzlUzuz3tB'; // TODO: set to database secret or custom auth token
+
 const DROPDOWN_SHEET   = 'Dropdown List';
 const ATTENDANCE_SHEET = 'Attendance Data';
 const USERNAMES_SHEET  = 'Usernames';
@@ -130,6 +136,8 @@ function doPost(e) {
       result = saveShiftEnd(body.data);
     } else if (action === 'updateFacilityLeft') {
       result = updateFacilityLeft(body.data);
+    } else if (action === 'deleteShift') {
+      result = deleteShiftAndGps(body.data);
     } else {
       result = { success: false, error: 'Unknown action: ' + action };
     }
@@ -725,6 +733,62 @@ function updateFacilityLeft(data) {
 }
 
 // =============================================================================
+// DELETE SHIFT + GPS CLEANUP
+// Called from admin tools when a shift row is deleted / purged.
+// data: { rowId, driverId }
+//   - rowId:   Attendance "Row ID" (SHIFT-...-driverId)
+//   - driverId: optional; if provided, gps/live/{driverId} is also cleared.
+// =============================================================================
+function deleteShiftAndGps(data) {
+  try {
+    if (!data || !data.rowId) {
+      return { success: false, error: 'rowId is required.' };
+    }
+
+    var rowId    = String(data.rowId).trim();
+    var driverId = data.driverId ? String(data.driverId).trim() : '';
+
+    // Delete attendance row (soft-fail if not found)
+    var ss    = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(ATTENDANCE_SHEET);
+    if (sheet) {
+      var rowNum = findRowByRowId_(sheet, rowId);
+      if (rowNum) {
+        sheet.deleteRow(rowNum);
+      }
+    }
+
+    // If Firebase config not filled, stop after sheet delete.
+    if (!FIREBASE_DB_URL || !FIREBASE_DB_TOKEN) {
+      return {
+        success: true,
+        warning: 'Shift row deleted. Firebase cleanup skipped — FIREBASE_DB_URL/TOKEN not configured.',
+      };
+    }
+
+    var baseUrl = FIREBASE_DB_URL.replace(/\/$/, '');
+    var paths   = [];
+
+    // gps/routes/{rowId}
+    paths.push('/gps/routes/' + encodeURIComponent(rowId));
+
+    // gps/live/{driverId} — optional
+    if (driverId) {
+      paths.push('/gps/live/' + encodeURIComponent(driverId));
+    }
+
+    paths.forEach(function(path) {
+      var url = baseUrl + path + '.json?auth=' + encodeURIComponent(FIREBASE_DB_TOKEN);
+      UrlFetchApp.fetch(url, { method: 'delete', muteHttpExceptions: true });
+    });
+
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+// =============================================================================
 // DRIVER DASHBOARD
 // =============================================================================
 
@@ -911,6 +975,7 @@ function getAdminDashboard(dateStr) {
       if (!shiftDate) return;
       var dateKey = formatDateOnly_(shiftDate);
 
+      var rowId        = String(row[COL.ROW_ID - 1]).trim();
       var driverName   = String(row[COL.DRIVER_NAME - 1]).trim();
       var driverId     = String(row[COL.DRIVER_ID - 1]).trim();
       var vehicle      = String(row[COL.VEHICLE - 1]).trim();
@@ -965,6 +1030,7 @@ function getAdminDashboard(dateStr) {
         }
 
         liveOps.push({
+          rowId:            rowId,
           driverId:         driverId,
           driverName:       driverName,
           shiftStartTime:   arrivalStr,
@@ -1305,7 +1371,7 @@ function getAdminHtml_() {
 '    </div>\n' +
 '    <div class="cards" id="live-cards"></div>\n' +
 '    <div class="section-title">Live Driver Status</div>\n' +
-'    <table><thead><tr><th>Driver</th><th>Stage</th><th>Vehicle</th><th>KM So Far</th><th>Shift Start</th><th>Wait / Run (mins)</th></tr></thead><tbody id="live-table"></tbody></table>\n' +
+'    <table><thead><tr><th>Driver</th><th>Stage</th><th>Vehicle</th><th>KM So Far</th><th>Shift Start</th><th>Wait / Run (mins)</th><th>Actions</th></tr></thead><tbody id="live-table"></tbody></table>\n' +
 '    <div class="section-title" style="margin-top:24px">Punch-Out Misses (Yesterday)</div>\n' +
 '    <table><thead><tr><th>Driver</th><th>Shift Date</th><th>Last Stage</th></tr></thead><tbody id="miss-table"></tbody></table>\n' +
 '  </div>\n' +
@@ -1425,6 +1491,39 @@ function getAdminHtml_() {
 '    return \'<span class="stage-pill \' + (cls[s]||"") + \'">\' + (labels[s]||s) + \'</span>\';\n' +
 '  }\n' +
 '\n' +
+'  function confirmDeleteShift(rowId, driverId, driverName) {\n' +
+'    if (!rowId) { alert("Row ID missing for this shift."); return; }\n' +
+'    var msg = "Delete shift for " + (driverName || driverId || rowId) + "?\\n\\n"\n' +
+'            + "This will remove the Google Sheet row, GPS route history, and the live map pin for this shift. This cannot be undone.";\n' +
+'    if (!confirm(msg)) return;\n' +
+'\n' +
+'    var payload = {\n' +
+'      action: "deleteShift",\n' +
+'      data: { rowId: rowId, driverId: driverId || "" }\n' +
+'    };\n' +
+'\n' +
+'    fetch(GAS_URL, {\n' +
+'      method: "POST",\n' +
+'      headers: { "Content-Type": "application/json" },\n' +
+'      body: JSON.stringify(payload),\n' +
+'    })\n' +
+'    .then(function(r) { return r.json(); })\n' +
+'    .then(function(res) {\n' +
+'      if (!res || res.success === false) {\n' +
+'        alert("Delete failed: " + (res && res.error ? res.error : "Unknown error"));\n' +
+'        return;\n' +
+'      }\n' +
+'      if (res.warning) {\n' +
+'        alert(res.warning);\n' +
+'      }\n' +
+'      loadDashboard();\n' +
+'    })\n' +
+'    .catch(function(err) {\n' +
+'      alert("Network error while deleting shift.");\n' +
+'      console.error(err);\n' +
+'    });\n' +
+'  }\n' +
+'\n' +
 '  function renderAll(d) {\n' +
 '    if (!d || d.error) { console.error("Dashboard error:", d && d.error); return; }\n' +
 '\n' +
@@ -1439,11 +1538,14 @@ function getAdminHtml_() {
 '    // Live table\n' +
 '    var liveHtml = "";\n' +
 '    (d.liveOperations || []).forEach(function(op) {\n' +
+'      var kmText = (op.kmSoFar != null ? op.kmSoFar.toFixed(1) : "0.0") + " km";\n' +
+'      var btn = "<button style=\\"font-size:11px;padding:4px 8px;border-radius:6px;border:none;background:#C62828;color:#fff;cursor:pointer;\\" "\n' +
+'        + "onclick=\\"confirmDeleteShift(\'" + (op.rowId || "") + "\', \'" + (op.driverId || "") + "\', \'" + (op.driverName || "") + "\')\\">Delete</button>";\n' +
 '      liveHtml += "<tr><td>" + op.driverName + "</td><td>" + stagePill(op.currentStage) + "</td><td>" +\n' +
-'        op.vehicle + "</td><td>" + op.kmSoFar.toFixed(1) + " km</td><td>" + op.shiftStartTime +\n' +
-'        "</td><td>W:" + op.facilityWaitMins + " / R:" + op.vehRunMins + "</td></tr>";\n' +
+'        (op.vehicle || "—") + "</td><td>" + kmText + "</td><td>" + op.shiftStartTime +\n' +
+'        "</td><td>W:" + op.facilityWaitMins + " / R:" + op.vehRunMins + "</td><td>" + btn + "</td></tr>";\n' +
 '    });\n' +
-'    document.getElementById("live-table").innerHTML = liveHtml || "<tr><td colspan=6 style=text-align:center;color:#aaa>No active drivers today</td></tr>";\n' +
+'    document.getElementById("live-table").innerHTML = liveHtml || "<tr><td colspan=7 style=text-align:center;color:#aaa>No active drivers today</td></tr>";\n' +
 '\n' +
 '    // Punch-out misses\n' +
 '    var missHtml = "";\n' +

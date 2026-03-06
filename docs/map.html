@@ -6,9 +6,6 @@
   <meta http-equiv="Cache-Control" content="no-store">
   <title>RSA Driver Pilot — Live Map</title>
 
-  <!-- Leaflet CSS -->
-  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
-
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
@@ -87,24 +84,6 @@
       box-shadow: -2px 2px 8px rgba(0,0,0,0.2);
     }
 
-    /* Custom marker styles (rendered as divIcon) */
-    .driver-marker-wrap {
-      display: flex; flex-direction: column; align-items: center;
-    }
-    .driver-marker-icon {
-      width: 36px; height: 36px; border-radius: 50%;
-      border: 3px solid #fff;
-      display: flex; align-items: center; justify-content: center;
-      font-size: 18px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-    }
-    .driver-marker-label {
-      margin-top: 2px; background: rgba(13,71,161,0.85);
-      color: #fff; font-size: 10px; font-weight: 700;
-      padding: 1px 6px; border-radius: 8px; white-space: nowrap;
-      max-width: 90px; overflow: hidden; text-overflow: ellipsis;
-    }
-
     @media (max-width: 640px) {
       #driver-panel { width: 200px; }
       #panel-toggle { right: 208px; }
@@ -133,11 +112,7 @@
   <div class="leg-row"><div class="leg-dot" style="background:#0D47A1"></div> Driver (live)</div>
   <div class="leg-row"><div class="leg-dot" style="background:#E53935"></div> Facility</div>
   <div class="leg-row"><div class="leg-line" style="background:#1976D2"></div> Snapped route</div>
-  <div class="leg-row"><div class="leg-line" style="background:#90CAF9;border-top:2px dashed #90CAF9;height:0"></div> Raw GPS</div>
 </div>
-
-<!-- Leaflet JS -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 
 <!-- Firebase App + Database + Auth (compat SDK v9) -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
@@ -148,7 +123,9 @@
 // =============================================================================
 // CONFIGURATION
 // =============================================================================
-const FIREBASE_CONFIG = {
+var GOOGLE_MAPS_API_KEY = 'AIzaSyCEO-OiBPuSJ8iGZuR8nXIJ9tGL-uVby1c';
+
+var FIREBASE_CONFIG = {
   apiKey:            "AIzaSyCTJcr0Yar3DIHLE36Pm6e3kdsFCIyt56k",
   authDomain:        "warehouse-stock-take.firebaseapp.com",
   databaseURL:       "https://warehouse-stock-take-default-rtdb.firebaseio.com",
@@ -157,11 +134,13 @@ const FIREBASE_CONFIG = {
   messagingSenderId: "740578243967"
 };
 
-const FACILITY = { lat: 24.903892, lng: 55.114065 };
-const OSRM_BASE = 'https://router.project-osrm.org/match/v1/driving/';
+var FACILITY = { lat: 24.903892, lng: 55.114065 };
+
+// Staleness: drivers with no GPS update for >15 min are treated as offline
+var STALE_THRESHOLD_MS = 15 * 60 * 1000;
 
 // Palette for up to 20 concurrent drivers
-const DRIVER_COLORS = [
+var DRIVER_COLORS = [
   '#0D47A1','#1B5E20','#880E4F','#E65100','#4A148C',
   '#006064','#BF360C','#1A237E','#33691E','#004D40',
   '#B71C1C','#F57F17','#01579B','#3E2723','#212121',
@@ -169,67 +148,69 @@ const DRIVER_COLORS = [
 ];
 
 // =============================================================================
-// INIT MAP
-// =============================================================================
-const map = L.map('map', { zoomControl: true }).setView([FACILITY.lat, FACILITY.lng], 13);
-
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
-  maxZoom: 19,
-}).addTo(map);
-
-// Facility marker (red pin)
-const facilityIcon = L.divIcon({
-  className: '',
-  html: '<div style="width:22px;height:22px;border-radius:50%;background:#E53935;border:3px solid #fff;box-shadow:0 2px 8px rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;font-size:11px;">&#127981;</div>',
-  iconSize: [22,22], iconAnchor: [11,11]
-});
-L.marker([FACILITY.lat, FACILITY.lng], { icon: facilityIcon })
-  .bindPopup('<b>RSA Facility</b>')
-  .addTo(map);
-
-// =============================================================================
 // STATE
 // =============================================================================
 // driverState[driverId] = {
-//   marker, polylineSnapped, polylineRaw, routePoints[], shiftRowId,
-//   routeRef (firebase ref), routeListener, color, osrmTimer, cardEl
+//   marker, infoWindow, polylines[], routePoints[], shiftRowId,
+//   routeRef, routeListener, color, snapTimer, cardEl, currentData
 // }
-const driverState = {};
-let colorIndex = 0;
+var map;
+var driverState = {};
+var colorIndex = 0;
 
 function nextColor() {
-  const c = DRIVER_COLORS[colorIndex % DRIVER_COLORS.length];
+  var c = DRIVER_COLORS[colorIndex % DRIVER_COLORS.length];
   colorIndex++;
   return c;
+}
+
+// =============================================================================
+// INIT MAP (called by Google Maps callback)
+// =============================================================================
+function initMap() {
+  map = new google.maps.Map(document.getElementById('map'), {
+    center: { lat: FACILITY.lat, lng: FACILITY.lng },
+    zoom: 13,
+    mapId: 'rsa_live_map',
+    disableDefaultUI: false,
+    zoomControl: true,
+    mapTypeControl: false,
+    streetViewControl: false,
+    fullscreenControl: false,
+  });
+
+  // Facility marker (red pin)
+  new google.maps.Marker({
+    position: { lat: FACILITY.lat, lng: FACILITY.lng },
+    map: map,
+    title: 'RSA Facility',
+    icon: {
+      path: google.maps.SymbolPath.CIRCLE,
+      scale: 10,
+      fillColor: '#E53935',
+      fillOpacity: 1,
+      strokeColor: '#fff',
+      strokeWeight: 3,
+    },
+  });
+
+  // Start Firebase auth + listeners
+  initFirebase();
 }
 
 // =============================================================================
 // STATUS BAR
 // =============================================================================
 function setStatus(state, label) {
-  const dot = document.getElementById('sync-dot');
-  dot.className = 'sync-dot ' + state;  // live | auth | err
+  var dot = document.getElementById('sync-dot');
+  dot.className = state;  // live | auth | err
   document.getElementById('sync-label').textContent = label;
 }
 
 function updateDriverCount() {
-  const n = Object.keys(driverState).length;
-  document.getElementById('driver-count').textContent = n + (n === 1 ? ' active' : ' active');
+  var n = Object.keys(driverState).length;
+  document.getElementById('driver-count').textContent = n + ' active';
   document.getElementById('no-drivers').style.display = n === 0 ? '' : 'none';
-}
-
-// =============================================================================
-// DRIVER MARKER
-// =============================================================================
-function makeDriverIcon(color, initial) {
-  return L.divIcon({
-    className: '',
-    html: '<div class="driver-marker-wrap">'
-      + '<div class="driver-marker-icon" style="background:' + color + '">&#128666;</div>'
-      + '</div>',
-    iconSize: [40,42], iconAnchor: [20,21], popupAnchor: [0,-22]
-  });
 }
 
 // =============================================================================
@@ -251,7 +232,7 @@ function upsertDriverCard(driverId, data) {
     card.id = 'card-' + driverId;
     card.onclick = function() {
       var ds = driverState[driverId];
-      if (ds && ds.marker) { map.panTo(ds.marker.getLatLng()); }
+      if (ds && ds.marker) { map.panTo(ds.marker.getPosition()); map.setZoom(14); }
     };
     panel.appendChild(card);
   }
@@ -275,53 +256,110 @@ function escHtml(s) {
 }
 
 // =============================================================================
-// OSRM ROAD SNAPPING
-// Sends up to 100 GPS points to OSRM match API, returns snapped [lat,lng] array.
-// Falls back to raw points if OSRM fails or returns no match.
+// GOOGLE ROADS API — SNAP TO ROADS
+// Sends GPS points to Roads API with interpolate=true for gap filling.
+// Chunks into batches of 90 (API limit 100) with 5-point overlap.
+// Returns array of segments (arrays of LatLng) for gap-aware rendering.
 // =============================================================================
-function snapToRoads(points) {
-  if (points.length < 2) return Promise.resolve(points.map(function(p){ return [p.lat, p.lng]; }));
-  // Use last 100 points max (OSRM limit)
-  var pts = points.slice(-100);
-  var coords = pts.map(function(p){ return p.lng + ',' + p.lat; }).join(';');
-  var radiuses = pts.map(function(){ return '25'; }).join(';');
-  var url = OSRM_BASE + coords + '?overview=full&geometries=geojson&radiuses=' + radiuses + '&tidy=true';
-  return fetch(url, { signal: AbortSignal.timeout(8000) })
-    .then(function(resp) {
-      if (!resp.ok) throw new Error('OSRM HTTP ' + resp.status);
-      return resp.json();
-    })
-    .then(function(json) {
-      // Concatenate all matching segments for better coverage
-      if (json.matchings && json.matchings.length > 0) {
-        var allCoords = [];
-        json.matchings.forEach(function(m) {
-          if (m.geometry && m.geometry.coordinates) {
-            m.geometry.coordinates.forEach(function(c) {
-              allCoords.push([c[1], c[0]]); // GeoJSON [lng,lat] -> Leaflet [lat,lng]
-            });
-          }
-        });
-        if (allCoords.length >= 2) return allCoords;
+function snapToRoads(points, retryCount) {
+  retryCount = retryCount || 0;
+  if (points.length < 2) return Promise.resolve({ segments: [points.map(function(p){ return {lat: p.lat, lng: p.lng}; })] });
+
+  // Chunk into batches of 90 with 5-point overlap
+  var BATCH = 90, OVERLAP = 5;
+  var batches = [];
+  for (var i = 0; i < points.length; i += BATCH - OVERLAP) {
+    batches.push(points.slice(i, i + BATCH));
+    if (i + BATCH >= points.length) break;
+  }
+
+  return processBatches(batches, OVERLAP)
+    .then(function(allSnapped) {
+      if (allSnapped.length < 2) {
+        return { segments: [points.map(function(p){ return {lat: p.lat, lng: p.lng}; })] };
       }
-      // Fallback: raw GPS
-      return pts.map(function(p){ return [p.lat, p.lng]; });
+      // Split at gaps > 500m
+      var segments = splitAtGaps(allSnapped, 500);
+      return { segments: segments.length > 0 ? segments : [allSnapped] };
     })
     .catch(function(e) {
-      console.warn('[OSRM] snap failed:', e.message, '- using raw GPS');
-      return pts.map(function(p){ return [p.lat, p.lng]; });
+      console.warn('[Roads API] snap failed (attempt ' + (retryCount+1) + '):', e.message);
+      if (retryCount < 1) {
+        return new Promise(function(resolve) {
+          setTimeout(function() { resolve(snapToRoads(points, retryCount + 1)); }, 2000);
+        });
+      }
+      return { segments: [points.map(function(p){ return {lat: p.lat, lng: p.lng}; })] };
     });
+}
+
+function processBatches(batches, overlap) {
+  var allSnapped = [];
+  var chain = Promise.resolve();
+  batches.forEach(function(batch, idx) {
+    chain = chain.then(function() {
+      var path = batch.map(function(p){ return p.lat + ',' + p.lng; }).join('|');
+      var url = 'https://roads.googleapis.com/v1/snapToRoads?path=' + path
+        + '&interpolate=true&key=' + GOOGLE_MAPS_API_KEY;
+      return fetch(url, { signal: AbortSignal.timeout(10000) })
+        .then(function(resp) {
+          if (!resp.ok) throw new Error('Roads API HTTP ' + resp.status);
+          return resp.json();
+        })
+        .then(function(data) {
+          if (!data.snappedPoints || data.snappedPoints.length === 0) return;
+          var coords = data.snappedPoints.map(function(sp) {
+            return { lat: sp.location.latitude, lng: sp.location.longitude };
+          });
+          // Skip overlap from previous batch
+          if (idx > 0 && allSnapped.length > 0 && coords.length > overlap) {
+            allSnapped = allSnapped.concat(coords.slice(overlap));
+          } else {
+            allSnapped = allSnapped.concat(coords);
+          }
+        });
+    });
+  });
+  return chain.then(function() { return allSnapped; });
+}
+
+// Haversine distance (metres)
+function haversineM(a, b) {
+  var R = 6371000;
+  var dLat = (b.lat - a.lat) * Math.PI / 180;
+  var dLng = (b.lng - a.lng) * Math.PI / 180;
+  var x = Math.sin(dLat/2) * Math.sin(dLat/2)
+        + Math.cos(a.lat*Math.PI/180) * Math.cos(b.lat*Math.PI/180)
+        * Math.sin(dLng/2) * Math.sin(dLng/2);
+  return R * 2 * Math.atan2(Math.sqrt(x), Math.sqrt(1-x));
+}
+
+// Split coordinate array into segments at gaps > thresholdM
+function splitAtGaps(coords, thresholdM) {
+  if (coords.length < 2) return [coords];
+  var segments = [];
+  var seg = [coords[0]];
+  for (var i = 1; i < coords.length; i++) {
+    if (haversineM(coords[i-1], coords[i]) > thresholdM) {
+      if (seg.length >= 2) segments.push(seg);
+      seg = [coords[i]];
+    } else {
+      seg.push(coords[i]);
+    }
+  }
+  if (seg.length >= 2) segments.push(seg);
+  return segments;
 }
 
 // =============================================================================
 // ROUTE RENDERING
-// Called when new route points arrive. Debounced per driver.
+// Debounced per driver. Draws multi-segment polylines.
 // =============================================================================
 function scheduleRouteRedraw(driverId) {
   var ds = driverState[driverId];
   if (!ds) return;
-  if (ds.osrmTimer) clearTimeout(ds.osrmTimer);
-  ds.osrmTimer = setTimeout(function(){ redrawRoute(driverId); }, 3000); // 3s debounce
+  if (ds.snapTimer) clearTimeout(ds.snapTimer);
+  ds.snapTimer = setTimeout(function(){ redrawRoute(driverId); }, 3000);
 }
 
 function redrawRoute(driverId) {
@@ -329,24 +367,32 @@ function redrawRoute(driverId) {
   if (!ds || ds.routePoints.length < 2) return;
 
   // Remove old polylines
-  if (ds.polylineSnapped) { map.removeLayer(ds.polylineSnapped); ds.polylineSnapped = null; }
-  if (ds.polylineRaw)     { map.removeLayer(ds.polylineRaw);     ds.polylineRaw = null; }
+  clearPolylines(ds);
 
-  var rawLatLngs = ds.routePoints.map(function(p){ return [p.lat, p.lng]; });
-
-  // Draw thin dashed raw GPS line as base layer
-  ds.polylineRaw = L.polyline(rawLatLngs, {
-    color: '#90CAF9', weight: 2, dashArray: '4 4', opacity: 0.6
-  }).addTo(map);
-
-  // Draw road-snapped polyline on top
-  snapToRoads(ds.routePoints).then(function(snapped) {
-    if (snapped.length >= 2) {
-      ds.polylineSnapped = L.polyline(snapped, {
-        color: ds.color, weight: 5, opacity: 0.85, lineJoin: 'round', lineCap: 'round'
-      }).addTo(map);
-    }
+  // Call Google Roads API for road-snapped polyline
+  snapToRoads(ds.routePoints).then(function(result) {
+    if (!driverState[driverId]) return; // driver removed while waiting
+    clearPolylines(ds); // clear any that appeared during async wait
+    result.segments.forEach(function(seg) {
+      if (seg.length >= 2) {
+        var pl = new google.maps.Polyline({
+          path: seg,
+          strokeColor: ds.color,
+          strokeWeight: 5,
+          strokeOpacity: 0.85,
+          map: map,
+        });
+        ds.polylines.push(pl);
+      }
+    });
   });
+}
+
+function clearPolylines(ds) {
+  if (ds.polylines) {
+    ds.polylines.forEach(function(pl) { pl.setMap(null); });
+  }
+  ds.polylines = [];
 }
 
 // =============================================================================
@@ -367,10 +413,9 @@ function attachRouteListener(driverId, shiftRowId) {
   var ref = firebase.database().ref('gps/routes/' + shiftRowId);
   var handler = function(snapshot) {
     var val = snapshot.val();
-    if (!val) { driverState[driverId].routePoints = []; return; }
-    // Sort by ts to ensure correct order
+    if (!val) { ds.routePoints = []; return; }
     var pts = Object.values(val).sort(function(a, b) { return a.ts < b.ts ? -1 : 1; });
-    driverState[driverId].routePoints = pts;
+    ds.routePoints = pts;
     scheduleRouteRedraw(driverId);
   };
   ref.on('value', handler);
@@ -383,8 +428,17 @@ function attachRouteListener(driverId, shiftRowId) {
 // =============================================================================
 function upsertDriver(driverId, data) {
   var today = new Date().toISOString().slice(0,10);
-  // Only show drivers from today (UTC date)
+  // Only show drivers from today
   if (data.date && data.date !== today) return;
+
+  // Staleness check: if last GPS update is >15 min old, treat as offline
+  if (data.ts) {
+    var tsAge = Date.now() - new Date(data.ts).getTime();
+    if (tsAge > STALE_THRESHOLD_MS) {
+      if (driverState[driverId]) removeDriver(driverId);
+      return;
+    }
+  }
 
   var lat = parseFloat(data.lat);
   var lng = parseFloat(data.lng);
@@ -393,35 +447,53 @@ function upsertDriver(driverId, data) {
   var ds = driverState[driverId];
 
   if (!ds) {
-    // New driver - create all resources
+    // New driver — create marker + state
     var color = nextColor();
-    var icon = makeDriverIcon(color, (data.driverName||'?')[0]);
-    var marker = L.marker([lat, lng], { icon: icon })
-      .bindPopup(function(){ return buildPopup(driverId); })
-      .addTo(map);
+    var marker = new google.maps.Marker({
+      position: { lat: lat, lng: lng },
+      map: map,
+      title: data.driverName || driverId,
+      icon: {
+        path: google.maps.SymbolPath.CIRCLE,
+        scale: 14,
+        fillColor: color,
+        fillOpacity: 1,
+        strokeColor: '#fff',
+        strokeWeight: 3,
+      },
+      label: {
+        text: '\uD83D\uDE9A', // truck emoji
+        fontSize: '16px',
+      },
+    });
+
+    var infoWindow = new google.maps.InfoWindow();
+    marker.addListener('click', function() {
+      infoWindow.setContent(buildPopup(driverId));
+      infoWindow.open(map, marker);
+    });
 
     ds = {
-      marker: marker, color: color,
-      polylineSnapped: null, polylineRaw: null,
-      routePoints: [], shiftRowId: null,
+      marker: marker, infoWindow: infoWindow, color: color,
+      polylines: [], routePoints: [], shiftRowId: null,
       routeRef: null, routeListener: null,
-      osrmTimer: null, cardEl: null,
+      snapTimer: null, cardEl: null, currentData: null,
     };
     driverState[driverId] = ds;
     updateDriverCount();
   } else {
     // Move existing marker
-    ds.marker.setLatLng([lat, lng]);
+    ds.marker.setPosition({ lat: lat, lng: lng });
   }
 
-  // Update popup and sidebar card
+  // Update data and sidebar card
   ds.currentData = data;
   upsertDriverCard(driverId, data);
 
   // Attach route listener if shiftRowId changed
   if (data.shiftRowId && data.shiftRowId !== ds.shiftRowId) {
     ds.shiftRowId = data.shiftRowId;
-    ds.routePoints = []; // reset points for new shift
+    ds.routePoints = [];
     attachRouteListener(driverId, data.shiftRowId);
   }
 }
@@ -447,11 +519,11 @@ function removeDriver(driverId) {
   var ds = driverState[driverId];
   if (!ds) return;
 
-  if (ds.marker)         { map.removeLayer(ds.marker); }
-  if (ds.polylineSnapped){ map.removeLayer(ds.polylineSnapped); }
-  if (ds.polylineRaw)    { map.removeLayer(ds.polylineRaw); }
-  if (ds.routeRef)       { ds.routeRef.off('value', ds.routeListener); }
-  if (ds.osrmTimer)      { clearTimeout(ds.osrmTimer); }
+  if (ds.marker)     { ds.marker.setMap(null); }
+  if (ds.infoWindow) { ds.infoWindow.close(); }
+  clearPolylines(ds);
+  if (ds.routeRef)   { ds.routeRef.off('value', ds.routeListener); }
+  if (ds.snapTimer)  { clearTimeout(ds.snapTimer); }
   removeDriverCard(driverId);
   delete driverState[driverId];
   updateDriverCount();
@@ -459,10 +531,6 @@ function removeDriver(driverId) {
 
 // =============================================================================
 // FIREBASE - LIVE POSITION LISTENER
-// Subscribes to gps/live and reacts to all child changes.
-// child_added   -> new driver appeared
-// child_changed -> driver moved / data updated
-// child_removed -> shift ended or shift deleted
 // =============================================================================
 function attachLiveListener() {
   var ref = firebase.database().ref('gps/live');
@@ -471,17 +539,33 @@ function attachLiveListener() {
   ref.on('child_changed', function(s){ upsertDriver(s.key, s.val()); });
   ref.on('child_removed', function(s){ removeDriver(s.key); });
 
-  // Mark as live once the initial data load completes
+  // Mark as live once initial data loads
   ref.once('value', function() {
     setStatus('live', 'Live (' + Object.keys(driverState).length + ' active)');
     document.getElementById('sync-dot').className = 'live';
   });
 
-  // Re-label count periodically
+  // Update count label periodically
   setInterval(function() {
     var n = Object.keys(driverState).length;
     document.getElementById('sync-label').textContent = 'Live (' + n + ' active)';
   }, 10000);
+
+  // Periodic staleness sweep — remove drivers whose last GPS update is >15 min old
+  setInterval(function() {
+    var now = Date.now();
+    Object.keys(driverState).forEach(function(id) {
+      var ds = driverState[id];
+      if (ds && ds.currentData && ds.currentData.ts) {
+        var age = now - new Date(ds.currentData.ts).getTime();
+        if (age > STALE_THRESHOLD_MS) {
+          console.log('[Stale] Removing driver', id, '- last update', Math.round(age/1000), 's ago');
+          removeDriver(id);
+        }
+      }
+    });
+    updateDriverCount();
+  }, 60000);
 }
 
 // =============================================================================
@@ -494,30 +578,35 @@ document.getElementById('panel-toggle').addEventListener('click', function() {
   panel.style.display = hidden ? '' : 'none';
   toggle.style.right = hidden ? '268px' : '0';
   toggle.style.borderRadius = hidden ? '6px 0 0 6px' : '6px';
-  setTimeout(function(){ map.invalidateSize(); }, 200);
 });
 
 // =============================================================================
 // FIREBASE INIT + ANONYMOUS AUTH
-// We attach listeners ONLY after auth succeeds to avoid silent permission errors.
-// Firebase anonymous auth persists in localStorage across reloads (no sign-in delay).
 // =============================================================================
-firebase.initializeApp(FIREBASE_CONFIG);
+function initFirebase() {
+  firebase.initializeApp(FIREBASE_CONFIG);
 
-setStatus('auth', 'Authenticating...');
+  setStatus('auth', 'Authenticating...');
 
-firebase.auth().onAuthStateChanged(function(user) {
-  if (user) {
-    setStatus('live', 'Connecting...');
-    attachLiveListener();
-  }
-});
+  firebase.auth().onAuthStateChanged(function(user) {
+    if (user) {
+      setStatus('live', 'Connecting...');
+      attachLiveListener();
+    }
+  });
 
-firebase.auth().signInAnonymously().catch(function(err) {
-  setStatus('err', 'Auth failed: ' + err.message);
-  console.error('[Firebase] Auth failed:', err);
-});
+  firebase.auth().signInAnonymously().catch(function(err) {
+    setStatus('err', 'Auth failed: ' + err.message);
+    console.error('[Firebase] Auth failed:', err);
+  });
+}
 
 </script>
+
+<!-- Google Maps JavaScript API (loads async, calls initMap when ready) -->
+<script async defer
+  src="https://maps.googleapis.com/maps/api/js?key=AIzaSyCEO-OiBPuSJ8iGZuR8nXIJ9tGL-uVby1c&callback=initMap">
+</script>
+
 </body>
 </html>

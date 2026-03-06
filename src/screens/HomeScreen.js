@@ -65,7 +65,7 @@ export default function HomeScreen({ navigation }) {
   const [liveKm, setLiveKm] = useState(0);
   const lastFgPos = React.useRef(null); // last foreground GPS position written
 
-  // Refresh GPS km + push foreground GPS heartbeat every 15 seconds while shift is active.
+  // Refresh GPS km + push foreground GPS heartbeat every 10 seconds while shift is active.
   // This supplements the background task — Android may throttle it when the app is in foreground.
   useFocusEffect(
     useCallback(() => {
@@ -74,7 +74,7 @@ export default function HomeScreen({ navigation }) {
 
       if (shiftActive) {
         loadGpsStats();
-        interval = setInterval(loadGpsStats, 15000);
+        interval = setInterval(loadGpsStats, 10000);
       }
 
       return () => {
@@ -89,7 +89,7 @@ export default function HomeScreen({ navigation }) {
       setLiveKm(stats.totalKm || 0);
 
       // Foreground GPS heartbeat: get current position and write to Firebase as a route point
-      // if the driver has moved >15m from the last foreground-written point.
+      // if the driver has moved >10m from the last foreground-written point.
       const shiftActive = shiftProgress?.stage1Done && !shiftProgress?.stage4Done;
       if (shiftActive && currentUser && shiftProgress?.rowId) {
         try {
@@ -107,7 +107,7 @@ export default function HomeScreen({ navigation }) {
               shouldAppend = true;
             } else {
               const d = distanceMetres(lastFgPos.current.lat, lastFgPos.current.lng, lat, lng);
-              shouldAppend = d > 15;
+              shouldAppend = d > 10;
             }
             if (shouldAppend) {
               lastFgPos.current = { lat, lng };
