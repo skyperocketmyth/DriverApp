@@ -162,6 +162,7 @@ var DRIVER_COLORS = [
 var map;
 var driverState = {};
 var colorIndex = 0;
+var initialLoadDone = false; // true after first Firebase snapshot processed
 
 function nextColor() {
   var c = DRIVER_COLORS[colorIndex % DRIVER_COLORS.length];
@@ -438,13 +439,14 @@ function upsertDriver(driverId, data) {
 
   // Cross-validate against GAS: if GAS data is loaded, only show drivers
   // that have an active (non-completed) shift in the Google Sheet.
-  // New drivers get a 90s grace period so they appear immediately after Stage 1
-  // even before the next GAS poll completes.
+  // During initial load, enforce GAS check immediately (no grace period).
+  // After initial load, new drivers get a 90s grace period so they appear
+  // immediately after Stage 1 even before the next GAS poll completes.
   var now = Date.now();
   if (!driverFirstSeen[driverId]) driverFirstSeen[driverId] = now;
   if (gasOperations !== null) {
-    var age = now - (driverFirstSeen[driverId] || 0);
-    if (age >= 90000) { // past grace period — enforce GAS check
+    var dominated = !initialLoadDone || (now - (driverFirstSeen[driverId] || 0)) >= 90000;
+    if (dominated) {
       var op = gasOperations.find(function(o) { return String(o.driverId) === String(driverId); });
       if (!op || op.hasCompleted) {
         if (driverState[driverId]) removeDriver(driverId);
@@ -559,6 +561,7 @@ function attachLiveListener() {
 
     // Mark as live once initial data loads
     ref.once('value', function() {
+      initialLoadDone = true;
       setStatus('live', 'Live (' + Object.keys(driverState).length + ' active)');
       document.getElementById('sync-dot').className = 'live';
     });
