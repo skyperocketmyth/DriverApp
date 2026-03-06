@@ -1,12 +1,8 @@
 // RSA Admin — Service Worker
-// Caches the app shell so it loads offline; never caches GAS API calls.
-const CACHE_NAME = 'rsa-admin-v2';
-const SHELL = ['./'];
+// Network-first: always fetch fresh content, fall back to cache when offline.
+const CACHE_NAME = 'rsa-admin-v3';
 
 self.addEventListener('install', function(e) {
-  e.waitUntil(
-    caches.open(CACHE_NAME).then(function(cache) { return cache.addAll(SHELL); })
-  );
   self.skipWaiting();
 });
 
@@ -22,12 +18,17 @@ self.addEventListener('activate', function(e) {
 });
 
 self.addEventListener('fetch', function(e) {
-  // Never intercept GAS API calls — they must always go to the network
+  // Never intercept API calls
   if (e.request.url.includes('script.google.com') || e.request.url.includes('maps.googleapis.com')) return;
 
+  // Network-first: try network, cache the response, fall back to cache
   e.respondWith(
-    caches.match(e.request).then(function(cached) {
-      return cached || fetch(e.request);
+    fetch(e.request).then(function(resp) {
+      var clone = resp.clone();
+      caches.open(CACHE_NAME).then(function(cache) { cache.put(e.request, clone); });
+      return resp;
+    }).catch(function() {
+      return caches.match(e.request);
     })
   );
 });
