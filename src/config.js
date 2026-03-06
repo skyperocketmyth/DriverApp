@@ -13,8 +13,8 @@ export const GAS_URL = 'https://script.google.com/macros/s/AKfycbyFz0vqYmZZkuBDk
 export const FACILITY = {
   lat: 24.903892,
   lng: 55.114065,
-  geofenceMetres:  200,    // driver must be within this radius to mark arrival
-  departureMetres: 500,  // auto-capture departure time when driver leaves beyond this radius
+  geofenceMetres:  999999, // ⚠️ TESTING — set back to 200 for production
+  departureMetres: 999999, // ⚠️ TESTING — set back to 500 for production
 };
 
 // Google Maps API key (Roads API + Maps JavaScript API)

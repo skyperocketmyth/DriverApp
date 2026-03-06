@@ -546,28 +546,32 @@ function removeDriver(driverId) {
 // FIREBASE - LIVE POSITION LISTENER
 // =============================================================================
 function attachLiveListener() {
-  var ref = firebase.database().ref('gps/live');
+  // Fetch GAS operations FIRST so gasOperations is populated before
+  // Firebase child_added events fire — this prevents ghost drivers
+  // from flickering on screen during initial load.
+  setStatus('auth', 'Loading active shifts...');
+  fetchGasOperations().then(function() {
+    var ref = firebase.database().ref('gps/live');
 
-  ref.on('child_added',   function(s){ upsertDriver(s.key, s.val()); });
-  ref.on('child_changed', function(s){ upsertDriver(s.key, s.val()); });
-  ref.on('child_removed', function(s){ removeDriver(s.key); });
+    ref.on('child_added',   function(s){ upsertDriver(s.key, s.val()); });
+    ref.on('child_changed', function(s){ upsertDriver(s.key, s.val()); });
+    ref.on('child_removed', function(s){ removeDriver(s.key); });
 
-  // Mark as live once initial data loads
-  ref.once('value', function() {
-    setStatus('live', 'Live (' + Object.keys(driverState).length + ' active)');
-    document.getElementById('sync-dot').className = 'live';
+    // Mark as live once initial data loads
+    ref.once('value', function() {
+      setStatus('live', 'Live (' + Object.keys(driverState).length + ' active)');
+      document.getElementById('sync-dot').className = 'live';
+    });
+
+    // Update count label periodically
+    setInterval(function() {
+      var n = Object.keys(driverState).length;
+      document.getElementById('sync-label').textContent = 'Live (' + n + ' active)';
+    }, 10000);
+
+    // Continue polling GAS periodically
+    setInterval(fetchGasOperations, GAS_POLL_INTERVAL_MS);
   });
-
-  // Update count label periodically
-  setInterval(function() {
-    var n = Object.keys(driverState).length;
-    document.getElementById('sync-label').textContent = 'Live (' + n + ' active)';
-  }, 10000);
-
-  // Poll GAS getLiveOperations to cross-validate Firebase drivers against Google Sheet.
-  // Drivers in Firebase but NOT in the sheet (or completed) are ghosts and get removed.
-  fetchGasOperations(); // initial fetch
-  setInterval(fetchGasOperations, GAS_POLL_INTERVAL_MS);
 
   // Periodic GAS-based sweep: remove drivers that are in Firebase but not in GAS active shifts
   setInterval(function() {
@@ -590,7 +594,7 @@ function attachLiveListener() {
 // =============================================================================
 function fetchGasOperations() {
   var url = GAS_URL + '?action=getLiveOperations';
-  fetch(url, { signal: AbortSignal.timeout(15000) })
+  return fetch(url, { signal: AbortSignal.timeout(15000) })
     .then(function(resp) {
       if (!resp.ok) throw new Error('GAS HTTP ' + resp.status);
       return resp.json();
