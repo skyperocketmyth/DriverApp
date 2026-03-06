@@ -5,8 +5,10 @@
 // =============================================================================
 import React, { useState, useEffect, useCallback } from 'react';
 import {
-  View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert,
+  View, Text, ScrollView, TouchableOpacity, StyleSheet, Alert, Platform,
 } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as IntentLauncher from 'expo-intent-launcher';
 import { useFocusEffect } from '@react-navigation/native';
 import * as Location from 'expo-location';
 import { useAppContext } from '../store/AppContext';
@@ -175,6 +177,46 @@ export default function HomeScreen({ navigation }) {
     }
   }
 
+  async function showBatteryOptimizationWarning() {
+    if (Platform.OS !== 'android') return;
+    try {
+      const shown = await AsyncStorage.getItem('gps_battery_warning_shown');
+      if (shown === 'true') return;
+      await AsyncStorage.setItem('gps_battery_warning_shown', 'true');
+
+      Alert.alert(
+        'GPS Tracking Accuracy',
+        'For accurate GPS tracking during your shift, please disable battery optimization for this app.\n\nTap "Open Settings" to adjust.',
+        [
+          { text: 'Later', style: 'cancel' },
+          {
+            text: 'Open Settings',
+            onPress: async () => {
+              try {
+                await IntentLauncher.startActivityAsync(
+                  IntentLauncher.ActivityAction.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                  { data: 'package:com.rsa.driverpilot' }
+                );
+              } catch (_) {
+                // Fallback: open general battery settings
+                try {
+                  await IntentLauncher.startActivityAsync(
+                    IntentLauncher.ActivityAction.IGNORE_BATTERY_OPTIMIZATION_SETTINGS
+                  );
+                } catch (_2) {
+                  Alert.alert(
+                    'Manual Step Required',
+                    'Please go to Settings > Battery > App Battery Management and disable optimization for RSA Driver Pilot.'
+                  );
+                }
+              }
+            },
+          },
+        ]
+      );
+    } catch (_) {}
+  }
+
   function handleStagePress(stage) {
     const enabled = isStageEnabled(stage.num);
     if (!enabled) {
@@ -197,6 +239,8 @@ export default function HomeScreen({ navigation }) {
       }
       return;
     }
+    // Show battery optimization warning on first Stage 1 press
+    if (stage.num === 1) showBatteryOptimizationWarning();
     navigation.navigate(stage.nav);
   }
 

@@ -368,6 +368,16 @@ function scheduleRouteRedraw(driverId) {
   ds.snapTimer = setTimeout(function(){ redrawRoute(driverId); }, 3000);
 }
 
+// Filter teleport jumps >5km (GPS cold-start / signal loss) — aligned with APK pipeline
+function filterTeleports(points) {
+  if (points.length < 2) return points;
+  var out = [points[0]];
+  for (var i = 1; i < points.length; i++) {
+    if (haversineM(points[i - 1], points[i]) < 5000) out.push(points[i]);
+  }
+  return out;
+}
+
 function redrawRoute(driverId) {
   var ds = driverState[driverId];
   if (!ds || ds.routePoints.length < 2) return;
@@ -375,8 +385,12 @@ function redrawRoute(driverId) {
   // Remove old polylines
   clearPolylines(ds);
 
+  // Filter teleport jumps before snapping (aligned with APK)
+  var filtered = filterTeleports(ds.routePoints);
+  if (filtered.length < 2) return;
+
   // Call Google Roads API for road-snapped polyline
-  snapToRoads(ds.routePoints).then(function(result) {
+  snapToRoads(filtered).then(function(result) {
     if (!driverState[driverId]) return; // driver removed while waiting
     clearPolylines(ds); // clear any that appeared during async wait
     result.segments.forEach(function(seg) {

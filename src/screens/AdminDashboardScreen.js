@@ -45,50 +45,6 @@ function filterRouteOutliers(points) {
   return filtered;
 }
 
-// Ramer-Douglas-Peucker simplification — removes collinear GPS noise (eps in metres)
-function perpendicularDist(pt, s, e) {
-  const dx = e.latitude - s.latitude, dy = e.longitude - s.longitude;
-  if (dx === 0 && dy === 0) {
-    const dlat = (pt.latitude - s.latitude) * 111320;
-    const dlng = (pt.longitude - s.longitude) * 111320 * Math.cos(s.latitude * Math.PI / 180);
-    return Math.sqrt(dlat * dlat + dlng * dlng);
-  }
-  const t = Math.max(0, Math.min(1, ((pt.latitude - s.latitude) * dx + (pt.longitude - s.longitude) * dy) / (dx * dx + dy * dy)));
-  const px = (s.latitude + t * dx - pt.latitude) * 111320;
-  const py = (s.longitude + t * dy - pt.longitude) * 111320 * Math.cos(pt.latitude * Math.PI / 180);
-  return Math.sqrt(px * px + py * py);
-}
-
-function rdpSimplify(pts, eps) {
-  if (pts.length < 3) return pts;
-  let maxD = 0, idx = 0;
-  const s = pts[0], e = pts[pts.length - 1];
-  for (let i = 1; i < pts.length - 1; i++) {
-    const d = perpendicularDist(pts[i], s, e);
-    if (d > maxD) { maxD = d; idx = i; }
-  }
-  if (maxD > eps) {
-    return [...rdpSimplify(pts.slice(0, idx + 1), eps).slice(0, -1), ...rdpSimplify(pts.slice(idx), eps)];
-  }
-  return [s, e];
-}
-
-// Downsample long polylines before hitting the snapping API
-function downsampleForSnap(points, maxPoints = 100) {
-  if (points.length <= maxPoints) return points;
-  const step = Math.ceil(points.length / maxPoints);
-  const out = [];
-  for (let i = 0; i < points.length; i += step) {
-    out.push(points[i]);
-  }
-  const last = points[points.length - 1];
-  const lastOut = out[out.length - 1];
-  if (!lastOut || lastOut.latitude !== last.latitude || lastOut.longitude !== last.longitude) {
-    out.push(last);
-  }
-  return out;
-}
-
 // Haversine distance between two {latitude, longitude} points (metres)
 function haversineM(a, b) {
   const R = 6371000;
@@ -101,23 +57,22 @@ function haversineM(a, b) {
 }
 
 // Google Roads API — snaps GPS traces to actual roads with interpolation.
-// `interpolate=true` fills gaps between sparse GPS points with road-following coords.
-// Chunks into batches of 90 (API limit 100) with 5-point overlap for continuity.
+// Sends ALL filtered points (no downsampling) in 90-point batches with 5-point overlap.
 // Returns { segments: [[{latitude, longitude}]] } for gap-aware multi-segment rendering.
+// On failure, falls back to raw filtered polyline.
 async function snapRouteToRoads(points) {
   if (!points || points.length < 2) return points || [];
-  try {
-    const cleaned = filterRouteOutliers(points);
-    const simplified = rdpSimplify(cleaned, 15);
-    if (simplified.length < 2) return simplified;
+  const cleaned = filterRouteOutliers(points);
+  if (cleaned.length < 2) return { segments: [cleaned] };
 
-    // Chunk into batches of 90 with 5-point overlap
+  try {
+    // Chunk ALL cleaned points into batches of 90 with 5-point overlap
     const BATCH = 90;
     const OVERLAP = 5;
     const batches = [];
-    for (let i = 0; i < simplified.length; i += BATCH - OVERLAP) {
-      batches.push(simplified.slice(i, i + BATCH));
-      if (i + BATCH >= simplified.length) break;
+    for (let i = 0; i < cleaned.length; i += BATCH - OVERLAP) {
+      batches.push(cleaned.slice(i, i + BATCH));
+      if (i + BATCH >= cleaned.length) break;
     }
 
     let allSnapped = [];
@@ -142,7 +97,7 @@ async function snapRouteToRoads(points) {
       }
     }
 
-    if (allSnapped.length < 2) return simplified;
+    if (allSnapped.length < 2) return { segments: [cleaned] };
 
     // Split into segments at gaps > 500m to prevent straight-line artifacts
     const GAP_M = 500;
@@ -160,26 +115,8 @@ async function snapRouteToRoads(points) {
 
     return { segments: segments.length > 0 ? segments : [allSnapped] };
   } catch {
-    // Retry once
-    try {
-      const cleaned = filterRouteOutliers(points);
-      const simplified = rdpSimplify(cleaned, 15);
-      const pts = downsampleForSnap(simplified);
-      if (pts.length < 2) return simplified;
-      const path = pts.map(p => `${p.latitude},${p.longitude}`).join('|');
-      const url = `https://roads.googleapis.com/v1/snapToRoads?path=${path}&interpolate=true&key=${GOOGLE_MAPS_API_KEY}`;
-      const resp = await fetch(url);
-      if (!resp.ok) return simplified;
-      const data = await resp.json();
-      if (!data.snappedPoints || data.snappedPoints.length < 2) return simplified;
-      const coords = data.snappedPoints.map(sp => ({
-        latitude: sp.location.latitude,
-        longitude: sp.location.longitude,
-      }));
-      return { segments: [coords] };
-    } catch {
-      return points;
-    }
+    // Fallback: render raw filtered polyline (no road snapping)
+    return { segments: [cleaned] };
   }
 }
 
