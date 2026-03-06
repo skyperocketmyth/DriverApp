@@ -136,8 +136,13 @@ var FIREBASE_CONFIG = {
 
 var FACILITY = { lat: 24.903892, lng: 55.114065 };
 
-// Staleness: drivers with no GPS update for >15 min are treated as offline
-var STALE_THRESHOLD_MS = 15 * 60 * 1000;
+// GAS backend URL for cross-validating active shifts
+var GAS_URL = 'https://script.google.com/macros/s/AKfycbyFz0vqYmZZkuBDktzQ0G2ElvVeGBC6zxA873oSv49-oZ7ir_cwM3a10tGvPM_kiyqjYg/exec';
+var GAS_POLL_INTERVAL_MS = 30000; // poll GAS every 30s
+
+// Live operations data from GAS (refreshed periodically)
+var gasOperations = null; // array of { driverId, hasCompleted } or null if not yet loaded
+var driverFirstSeen = {};  // driverId -> timestamp of first appearance in Firebase
 
 // Palette for up to 20 concurrent drivers
 var DRIVER_COLORS = [
@@ -431,12 +436,20 @@ function upsertDriver(driverId, data) {
   // Only show drivers from today
   if (data.date && data.date !== today) return;
 
-  // Staleness check: if last GPS update is >15 min old, treat as offline
-  if (data.ts) {
-    var tsAge = Date.now() - new Date(data.ts).getTime();
-    if (tsAge > STALE_THRESHOLD_MS) {
-      if (driverState[driverId]) removeDriver(driverId);
-      return;
+  // Cross-validate against GAS: if GAS data is loaded, only show drivers
+  // that have an active (non-completed) shift in the Google Sheet.
+  // New drivers get a 90s grace period so they appear immediately after Stage 1
+  // even before the next GAS poll completes.
+  var now = Date.now();
+  if (!driverFirstSeen[driverId]) driverFirstSeen[driverId] = now;
+  if (gasOperations !== null) {
+    var age = now - (driverFirstSeen[driverId] || 0);
+    if (age >= 90000) { // past grace period — enforce GAS check
+      var op = gasOperations.find(function(o) { return String(o.driverId) === String(driverId); });
+      if (!op || op.hasCompleted) {
+        if (driverState[driverId]) removeDriver(driverId);
+        return;
+      }
     }
   }
 
@@ -551,21 +564,57 @@ function attachLiveListener() {
     document.getElementById('sync-label').textContent = 'Live (' + n + ' active)';
   }, 10000);
 
-  // Periodic staleness sweep — remove drivers whose last GPS update is >15 min old
+  // Poll GAS getLiveOperations to cross-validate Firebase drivers against Google Sheet.
+  // Drivers in Firebase but NOT in the sheet (or completed) are ghosts and get removed.
+  fetchGasOperations(); // initial fetch
+  setInterval(fetchGasOperations, GAS_POLL_INTERVAL_MS);
+
+  // Periodic GAS-based sweep: remove drivers that are in Firebase but not in GAS active shifts
   setInterval(function() {
-    var now = Date.now();
+    if (gasOperations === null) return; // GAS not yet loaded
     Object.keys(driverState).forEach(function(id) {
-      var ds = driverState[id];
-      if (ds && ds.currentData && ds.currentData.ts) {
-        var age = now - new Date(ds.currentData.ts).getTime();
-        if (age > STALE_THRESHOLD_MS) {
-          console.log('[Stale] Removing driver', id, '- last update', Math.round(age/1000), 's ago');
-          removeDriver(id);
-        }
+      var age = Date.now() - (driverFirstSeen[id] || 0);
+      if (age < 90000) return; // grace period for new drivers
+      var op = gasOperations.find(function(o) { return String(o.driverId) === String(id); });
+      if (!op || op.hasCompleted) {
+        console.log('[GAS] Removing ghost driver', id, '- not in active shifts');
+        removeDriver(id);
       }
     });
     updateDriverCount();
   }, 60000);
+}
+
+// =============================================================================
+// GAS LIVE OPERATIONS — polls Google Sheet for active shifts
+// =============================================================================
+function fetchGasOperations() {
+  var url = GAS_URL + '?action=getLiveOperations';
+  fetch(url, { signal: AbortSignal.timeout(15000) })
+    .then(function(resp) {
+      if (!resp.ok) throw new Error('GAS HTTP ' + resp.status);
+      return resp.json();
+    })
+    .then(function(data) {
+      if (data.operations) {
+        gasOperations = data.operations;
+        console.log('[GAS] Loaded', gasOperations.length, 'operations');
+        // Immediately sweep ghosts after fresh GAS data
+        Object.keys(driverState).forEach(function(id) {
+          var age = Date.now() - (driverFirstSeen[id] || 0);
+          if (age < 90000) return;
+          var op = gasOperations.find(function(o) { return String(o.driverId) === String(id); });
+          if (!op || op.hasCompleted) {
+            console.log('[GAS] Removing ghost driver', id);
+            removeDriver(id);
+          }
+        });
+        updateDriverCount();
+      }
+    })
+    .catch(function(e) {
+      console.warn('[GAS] Failed to fetch live operations:', e.message);
+    });
 }
 
 // =============================================================================

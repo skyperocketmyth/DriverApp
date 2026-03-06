@@ -31,10 +31,6 @@ auth().signInAnonymously().catch(() => {});
 const RTDB_LIVE   = 'gps/live';
 const RTDB_ROUTES = 'gps/routes';
 
-// Drivers whose last GPS write is older than this are treated as offline.
-// Background task writes every 5-30s; 15 min covers network outages and SDK replay.
-const STALE_THRESHOLD_MS = 15 * 60 * 1000;
-
 // =============================================================================
 // WRITE GPS POINT
 // Writes to two locations atomically:
@@ -87,16 +83,7 @@ export function subscribeToLivePositions(callback) {
 
   const handler = snapshot => {
     const val = snapshot.val() || {};
-    const now = Date.now();
-    const drivers = Object.values(val).filter(d => {
-      if (d.date !== today) return false;
-      // Staleness: if last GPS update is >15 min old, treat as offline
-      if (d.ts) {
-        const age = now - new Date(d.ts).getTime();
-        if (age > STALE_THRESHOLD_MS) return false;
-      }
-      return true;
-    });
+    const drivers = Object.values(val).filter(d => d.date === today);
     callback(drivers);
   };
 

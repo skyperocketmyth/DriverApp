@@ -133,13 +133,6 @@ Both writes are fire-and-forget. The Firebase SDK stores them in on-device SQLit
 
 **Anonymous auth**: The app signs in anonymously (`auth().signInAnonymously()`) so writes satisfy the Firebase security rule `auth != null`. The session persists across restarts so there is no sign-in delay.
 
-### Staleness filter: `subscribeToLivePositions()`
-
-The subscription filters out drivers whose `ts` is older than 15 minutes. This prevents ghost drivers from appearing when:
-- A driver's app crashes without calling `clearLivePosition()`
-- Sheet data is deleted but Firebase entries persist
-- A driver's phone dies mid-shift
-
 ### Shift lifecycle
 
 | Event | GPS action |
@@ -160,9 +153,9 @@ The **Map tab** in the admin app uses `react-native-maps` (Google Maps SDK under
 subscribeToLivePositions(callback)   // src/services/firebase.js
 ```
 
-Opens a real-time Firebase listener on `gps/live`. Fires immediately with current data, then on every change. Filters to today's date only + 15-minute staleness check. Returns an unsubscribe function for cleanup on unmount.
+Opens a real-time Firebase listener on `gps/live`. Fires immediately with current data, then on every change. Filters to today's date only. Returns an unsubscribe function for cleanup on unmount.
 
-The admin app enriches each Firebase driver record with `vehicle` and `currentStage` from the GAS `getLiveOperations` API (joined on `driverName`).
+The admin app cross-validates Firebase drivers against GAS `getLiveOperations` — drivers not found in active Google Sheet shifts (or marked completed) are removed after a 90-second grace period. It also enriches each driver record with `vehicle` and `currentStage` from GAS (joined on `driverId`).
 
 ### Fetching routes
 
@@ -234,9 +227,9 @@ The browser uses the Firebase compat SDK (loaded from CDN):
 3. For each driver with a `shiftRowId`, attach a `.on('value')` listener on `gps/routes/{shiftRowId}`
 4. Route changes are debounced (3s) then snapped via Google Roads API
 
-### Staleness sweep
+### GAS cross-validation (ghost driver prevention)
 
-A 60-second interval checks all tracked drivers. Any driver whose `ts` is >15 minutes old is removed from the map. This auto-cleans ghost drivers even if Firebase `child_removed` never fires.
+The PWA polls `getLiveOperations` from GAS every 30 seconds. This returns today's active shifts from the Google Sheet. Firebase drivers that are NOT found in the sheet (or have `hasCompleted: true`) are removed from the map after a 90-second grace period (to allow new Stage 1 drivers to appear before the next GAS poll).
 
 ### Route processing pipeline (in `map.html`)
 
@@ -309,11 +302,11 @@ clearLivePosition(userId)
 ```
 The live pin disappears from both maps within seconds (Firebase pushes the deletion to all listeners).
 
-### Staleness auto-removal (automatic)
+### GAS cross-validation auto-removal (automatic)
 
-Both map views filter out drivers whose `ts` is >15 minutes old:
-- Native app: `subscribeToLivePositions()` in `firebase.js` filters before callback
-- PWA: `upsertDriver()` checks staleness on every update + 60-second sweep interval
+Both map views cross-validate Firebase drivers against Google Sheet data:
+- Native app: `MapTab` in `AdminDashboardScreen.js` checks `liveOpsData` from GAS — drivers not in active shifts are removed after 90s grace period
+- PWA: `map.html` polls `getLiveOperations` every 30s — drivers not in the sheet are removed after 90s grace period + immediate sweep on each GAS response
 
 ### GAS-initiated cleanup (shift deletion from admin)
 
@@ -352,7 +345,7 @@ Admin native app             PWA browser (map.html)
 (AdminDashboardScreen.js)    (Google Maps JS API)
 react-native-maps MapView    google.maps.Map
 Google Roads API snapping    Google Roads API snapping
-15-min staleness filter      15-min staleness filter + 60s sweep
+GAS cross-validation      GAS cross-validation + 60s sweep
 ```
 
 ---
