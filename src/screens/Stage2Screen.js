@@ -15,7 +15,7 @@ import CameraCapture from '../components/CameraCapture';
 import DateTimePicker from '../components/DateTimePicker';
 import GpsBanner from './GpsBanner';
 import { saveDeparture } from '../services/api';
-import { getAutoFacilityLeftTime } from '../services/gps';
+import { getAutoFacilityLeftTime, setDepartureArmed } from '../services/gps';
 import { COLORS } from '../config';
 import { t, isRTL } from '../i18n/translations';
 
@@ -135,6 +135,9 @@ export default function Stage2Screen({ navigation }) {
       // Update shift progress
       const progress = { ...shiftProgress, stage2Done: true };
       await setShiftProgress(progress);
+
+      // Enable 500m facility-departure detection now that driver has confirmed leaving
+      setDepartureArmed().catch(() => {});
 
       navigation.navigate('Success', {
         stage:         2,

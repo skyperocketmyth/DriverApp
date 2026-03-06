@@ -20,13 +20,14 @@ import { writeGpsPoint } from './firebase';
 import { updateFacilityLeft } from './api';
 
 // AsyncStorage keys (local device state — not synced to any backend)
-const KEY_LAST_POS       = 'gps_last_position';      // { lat, lng, ts }
-const KEY_LAST_ROUTE_POS = 'gps_last_route_pos';     // { lat, lng } — last point pushed to Firebase route
-const KEY_TOTAL_KM       = 'gps_total_km';           // accumulated km (string)
-const KEY_FACILITY_LEFT  = 'gps_facility_left_time'; // ISO string
-const KEY_SHIFT_ACTIVE   = 'gps_shift_active';       // 'true' | 'false'
-const KEY_GPS_USER       = 'gps_tracking_user';      // JSON { userId, userName }
-const KEY_SHIFT_ROW_ID   = 'gps_shift_row_id';       // GAS attendance row ID
+const KEY_LAST_POS         = 'gps_last_position';      // { lat, lng, ts }
+const KEY_LAST_ROUTE_POS   = 'gps_last_route_pos';     // { lat, lng } — last point pushed to Firebase route
+const KEY_TOTAL_KM         = 'gps_total_km';           // accumulated km (string)
+const KEY_FACILITY_LEFT    = 'gps_facility_left_time'; // ISO string
+const KEY_SHIFT_ACTIVE     = 'gps_shift_active';       // 'true' | 'false'
+const KEY_GPS_USER         = 'gps_tracking_user';      // JSON { userId, userName }
+const KEY_SHIFT_ROW_ID     = 'gps_shift_row_id';       // GAS attendance row ID
+const KEY_DEPARTURE_ARMED  = 'gps_departure_armed';    // 'true' after Stage 2 submit
 
 export const BACKGROUND_LOCATION_TASK = 'RSA_BACKGROUND_LOCATION';
 
@@ -131,16 +132,21 @@ TaskManager.defineTask(BACKGROUND_LOCATION_TASK, async ({ data, error }) => {
       } catch (_) {}
 
       // --- Auto facility departure detection (500m) ---
-      const facilityLeftTime = await AsyncStorage.getItem(KEY_FACILITY_LEFT);
-      if (!facilityLeftTime) {
-        const distFromFacility = distanceMetres(FACILITY.lat, FACILITY.lng, newLat, newLng);
-        if (distFromFacility > (FACILITY.departureMetres || 500)) {
-          await AsyncStorage.setItem(KEY_FACILITY_LEFT, now);
-          console.log('[GPS Task] Facility left at:', now, '— dist:', Math.round(distFromFacility), 'm');
-          try {
-            const rowIdRaw = await AsyncStorage.getItem(KEY_SHIFT_ROW_ID);
-            if (rowIdRaw) updateFacilityLeft(rowIdRaw, now).catch(() => {});
-          } catch (_) {}
+      // Only armed AFTER Stage 2 is submitted — prevents premature trigger when
+      // driver starts shift from home or a remote location.
+      const departureArmed = await AsyncStorage.getItem(KEY_DEPARTURE_ARMED);
+      if (departureArmed === 'true') {
+        const facilityLeftTime = await AsyncStorage.getItem(KEY_FACILITY_LEFT);
+        if (!facilityLeftTime) {
+          const distFromFacility = distanceMetres(FACILITY.lat, FACILITY.lng, newLat, newLng);
+          if (distFromFacility > (FACILITY.departureMetres || 500)) {
+            await AsyncStorage.setItem(KEY_FACILITY_LEFT, now);
+            console.log('[GPS Task] Facility left at:', now, '— dist:', Math.round(distFromFacility), 'm');
+            try {
+              const rowIdRaw = await AsyncStorage.getItem(KEY_SHIFT_ROW_ID);
+              if (rowIdRaw) updateFacilityLeft(rowIdRaw, now).catch(() => {});
+            } catch (_) {}
+          }
         }
       }
     }
@@ -210,13 +216,14 @@ export async function startShiftTracking(initialLat, initialLng, userId, userNam
 
     // Now safe to reset all tracking state for the new shift
     await AsyncStorage.multiSet([
-      [KEY_LAST_POS,       JSON.stringify({ lat: initialLat || 0, lng: initialLng || 0, ts: new Date().toISOString() })],
-      [KEY_LAST_ROUTE_POS, ''],
-      [KEY_TOTAL_KM,       '0'],
-      [KEY_FACILITY_LEFT,  ''],
-      [KEY_SHIFT_ACTIVE,   'true'],
-      [KEY_GPS_USER,       JSON.stringify({ userId: userId || '', userName: userName || '' })],
-      [KEY_SHIFT_ROW_ID,   String(rowId || '')],
+      [KEY_LAST_POS,        JSON.stringify({ lat: initialLat || 0, lng: initialLng || 0, ts: new Date().toISOString() })],
+      [KEY_LAST_ROUTE_POS,  ''],
+      [KEY_TOTAL_KM,        '0'],
+      [KEY_FACILITY_LEFT,   ''],
+      [KEY_SHIFT_ACTIVE,    'true'],
+      [KEY_GPS_USER,        JSON.stringify({ userId: userId || '', userName: userName || '' })],
+      [KEY_SHIFT_ROW_ID,    String(rowId || '')],
+      [KEY_DEPARTURE_ARMED, 'false'],  // armed only after Stage 2 submit
     ]);
 
     await Location.startLocationUpdatesAsync(BACKGROUND_LOCATION_TASK, {
@@ -267,7 +274,7 @@ export async function stopShiftTracking(userId) {
 
     await AsyncStorage.multiRemove([
       KEY_LAST_POS, KEY_LAST_ROUTE_POS, KEY_TOTAL_KM, KEY_FACILITY_LEFT,
-      KEY_SHIFT_ACTIVE, KEY_GPS_USER, KEY_SHIFT_ROW_ID,
+      KEY_SHIFT_ACTIVE, KEY_GPS_USER, KEY_SHIFT_ROW_ID, KEY_DEPARTURE_ARMED,
     ]);
 
     return { totalKm, facilityLeftTime };
@@ -305,4 +312,15 @@ export async function getAutoFacilityLeftTime() {
   } catch (_) {
     return null;
   }
+}
+
+// =============================================================================
+// ARM DEPARTURE DETECTION — called after Stage 2 submit
+// Enables the 500m facility-left check in the background task.
+// Must be called only after the driver has confirmed departure from the facility.
+// =============================================================================
+export async function setDepartureArmed() {
+  try {
+    await AsyncStorage.setItem(KEY_DEPARTURE_ARMED, 'true');
+  } catch (_) {}
 }
